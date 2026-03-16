@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+logs/
+*.log
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 配置（包含敏感信息）
+config.yaml
+config.yml
+.env
+.env.local
+
+# Node.js / 前端
+node_modules/
+dist/
+.npm/
+.cache/
+.vite/
+coverage/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.temp
+
+
+
+.env
+.env.*
+*.pem
+*.key
+*.log
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/

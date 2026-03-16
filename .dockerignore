@@ -1,0 +1,27 @@
+# 忽略文件和目录
+node_modules
+npm-debug.log
+.env
+.env.local
+.DS_Store
+.git
+.gitignore
+*.md
+!README.md
+
+# 后端
+backend/__pycache__
+backend/*.pyc
+backend/.pytest_cache
+backend/.ruff_cache
+backend/.mypy_cache
+backend/logs/*
+!backend/logs/.gitkeep
+backend/db_ha_manager.db
+backend/.venv
+
+# 前端
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/coverage
