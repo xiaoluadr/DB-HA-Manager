@@ -420,9 +420,19 @@ class OraclePreviewExecutor:
         discovery.standby_oracle.oracle_home = self._resolve_standby_oracle_home()
         discovery.standby_oracle.oracle_sid = self._resolve_standby_sid()
         discovery.standby_oracle.oracle_base = self.request.standby_oracle_base
-        discovery.standby_oracle.storage_type = self._resolve_standby_storage_type()
+        # 备库 storage_type：用户输入 > 继承主库 > 主库探测值
+        if self.request.standby_storage_type:
+            discovery.standby_oracle.storage_type = self.request.standby_storage_type
+        elif discovery.primary_oracle.storage_type:
+            discovery.standby_oracle.storage_type = discovery.primary_oracle.storage_type
+        else:
+            discovery.standby_oracle.storage_type = self._resolve_standby_storage_type()
         discovery.standby_oracle.listener_port = self._resolve_standby_listener_port()
-        discovery.standby_oracle.is_cdb = self.request.standby_is_cdb
+        # 备库 is_cdb：用户输入 > 继承主库 > 主库探测值
+        if self.request.standby_is_cdb is not None:
+            discovery.standby_oracle.is_cdb = self.request.standby_is_cdb
+        elif discovery.primary_oracle.is_cdb is not None:
+            discovery.standby_oracle.is_cdb = discovery.primary_oracle.is_cdb
         discovery.standby_oracle.db_unique_name = self.request.db_unique_name_standby
         discovery.standby_oracle.service_name = self.request.standby_service_name
 
@@ -488,16 +498,65 @@ class OraclePreviewExecutor:
             discovery.storage["standby_archive_path"] = self.request.archivelog_path
 
         if self.primary_ssh and primary_data_path:
+            primary_path_meta = self._inspect_path(self.primary_ssh, primary_data_path)
+            discovery.storage["primary_data_dir_status"] = primary_path_meta.get("status")
+            discovery.storage["primary_data_dir_writable"] = primary_path_meta.get("writable")
+            discovery.storage["primary_data_dir_has_files"] = primary_path_meta.get("has_files")
             df_cmd = f"df -h {primary_data_path} | tail -1"
             df_result = self.primary_ssh.execute(df_cmd)
             if df_result.success:
                 discovery.storage["primary_disk_usage"] = df_result.stdout.strip()
 
         if self.standby_ssh and standby_data_path:
+            standby_path_meta = self._inspect_path(self.standby_ssh, standby_data_path)
+            discovery.storage["standby_data_dir_status"] = standby_path_meta.get("status")
+            discovery.storage["standby_data_dir_writable"] = standby_path_meta.get("writable")
+            discovery.storage["standby_data_dir_has_files"] = standby_path_meta.get("has_files")
             df_cmd = f"df -h {standby_data_path} | tail -1"
             df_result = self.standby_ssh.execute(df_cmd)
             if df_result.success:
                 discovery.storage["standby_disk_usage"] = df_result.stdout.strip()
+
+        # 主备日志目录检查
+        if self.primary_ssh and primary_redo_path:
+            primary_log_meta = self._inspect_path(self.primary_ssh, primary_redo_path)
+            discovery.storage["primary_log_dir_status"] = primary_log_meta.get("status")
+            discovery.storage["primary_log_dir_writable"] = primary_log_meta.get("writable")
+            discovery.storage["primary_log_dir_has_files"] = primary_log_meta.get("has_files")
+
+        if self.standby_ssh and standby_redo_path:
+            standby_log_meta = self._inspect_path(self.standby_ssh, standby_redo_path)
+            discovery.storage["standby_log_dir_status"] = standby_log_meta.get("status")
+            discovery.storage["standby_log_dir_writable"] = standby_log_meta.get("writable")
+            discovery.storage["standby_log_dir_has_files"] = standby_log_meta.get("has_files")
+
+    def _inspect_path(self, ssh: Optional[RemoteExecutor], path: Optional[str]) -> Dict[str, Optional[Union[bool, str]]]:
+        """检查目录状态，返回 exists、writable、has_files 和 status"""
+        if not ssh or not path:
+            return {}
+        normalized = path.strip()
+        if not normalized or normalized.startswith("+"):
+            return {}
+        quoted_path = shlex.quote(normalized)
+        exists_result = ssh.execute(f"test -d {quoted_path}", timeout=10)
+        if not exists_result.success:
+            return {"exists": False, "writable": None, "has_files": None, "status": "not_exists"}
+        writable_result = ssh.execute(f"test -w {quoted_path}", timeout=10)
+        if not writable_result.success:
+            files_result = ssh.execute(f"ls -A {quoted_path}", timeout=10)
+            return {
+                "exists": True,
+                "writable": False,
+                "has_files": bool((files_result.stdout or "").strip()) if files_result.success else False,
+                "status": "not_writable",
+            }
+        files_result = ssh.execute(f"ls -A {quoted_path}", timeout=10)
+        return {
+            "exists": True,
+            "writable": True,
+            "has_files": bool((files_result.stdout or "").strip()) if files_result.success else False,
+            "status": "ok",
+        }
 
     def _detect_conflicts(self, discovery: DiscoveryInfo):
         """检测冲突"""

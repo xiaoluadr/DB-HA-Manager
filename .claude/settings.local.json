@@ -41,7 +41,17 @@
       "mcp__codex__codex-reply",
       "mcp__playwright__browser_evaluate",
       "mcp__playwright__browser_take_screenshot",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "mcp__playwright__browser_tabs",
+      "mcp__chrome-devtools__select_page",
+      "mcp__playwright__browser_close",
+      "Bash(ssh:*)",
+      "Bash(sshpass:*)",
+      "Bash(docker-compose logs:*)",
+      "Bash(docker-compose ps:*)",
+      "Bash(ls:*)",
+      "Bash(PYTHONPATH=/home/lujingwei/DB-HA-Manager/backend python3:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

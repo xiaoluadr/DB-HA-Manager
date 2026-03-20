@@ -367,6 +367,7 @@ class PreviewRequest(BaseModel):
     # 路径配置
     data_files_path: str = Field(default="/u01/oradata/ORCL")
     archivelog_path: str = Field(default="/u01/oradata/ORCL/archivelog")
+    standby_archive_path: str = Field(..., min_length=1)
     backup_path: Optional[str] = None
 
     # 新增：主库 Oracle 配置

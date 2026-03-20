@@ -337,7 +337,15 @@ const cardStyle = {
   borderColor: 'var(--border)',
 }
 
-type FieldValueSource = 'auto' | 'user' | 'override'
+type FieldValueSource =
+  | 'auto_success'
+  | 'auto_failed'
+  | 'user_input'
+  | 'user_override'
+  | 'inherit_primary'
+  | 'planned'
+
+type StatusTagType = DiscoveryStatus | 'warning'
 
 interface FieldDisplayMeta {
   value: any
@@ -349,10 +357,11 @@ interface FieldValueRowProps {
   label: string
   value: any
   source?: FieldValueSource
-  status?: DiscoveryStatus
+  status?: StatusTagType
   editableKey?: OverrideFieldKey
   extra?: ReactNode
   rowKey?: string
+  customValue?: ReactNode
 }
 
 interface FieldOverrideConfig {
@@ -367,12 +376,15 @@ interface FieldOverrideConfig {
 }
 
 const VALUE_SOURCE_TAGS: Record<FieldValueSource, { label: string; color: string }> = {
-  auto: { label: '自动探测', color: 'var(--green)' },
-  user: { label: '用户输入', color: '#9254de' },
-  override: { label: '已覆盖', color: 'var(--orange)' },
+  auto_success: { label: '自动探测成功', color: 'var(--green)' },
+  auto_failed: { label: '自动探测失败', color: 'var(--red)' },
+  user_input: { label: '用户输入', color: '#9254de' },
+  user_override: { label: '用户输入', color: 'var(--orange)' },
+  inherit_primary: { label: '继承主库', color: 'var(--primary)' },
+  planned: { label: '计划值', color: 'var(--text2)' },
 }
 
-const DISCOVERY_STATUS_META: Record<DiscoveryStatus, { label: string; color: string }> = {
+const DISCOVERY_STATUS_META: Record<StatusTagType, { label: string; color: string }> = {
   success: { label: '成功', color: 'var(--green)' },
   failed: { label: '失败', color: 'var(--red)' },
   timeout: { label: '超时', color: 'var(--orange)' },
@@ -381,6 +393,7 @@ const DISCOVERY_STATUS_META: Record<DiscoveryStatus, { label: string; color: str
   partial: { label: '部分', color: 'var(--primary)' },
   skipped: { label: '跳过', color: 'var(--border)' },
   unknown: { label: '未知', color: 'var(--border)' },
+  warning: { label: '告警', color: 'var(--yellow)' },
 }
 
 const STORAGE_SELECT_OPTIONS: { label: string; value: string }[] = [
@@ -517,6 +530,21 @@ const formatValue = (value: any): string => {
 }
 
 const isNil = (value: any): boolean => value === null || value === undefined || value === ''
+
+const STORAGE_DIR_LABELS: Record<string, string> = {
+  not_exists: '目录不存在',
+  not_writable: '目录不可写',
+  ok: '可写',
+  ok_exists_files: '存在且有文件',
+}
+
+const formatWritable = (value: any, status?: string): string | undefined => {
+  if (status && STORAGE_DIR_LABELS[status]) {
+    return STORAGE_DIR_LABELS[status]
+  }
+  if (isNil(value)) return undefined
+  return value ? '可写' : '不可写'
+}
 
 const getDiscoveryValue = (info: DiscoveryInfo | undefined, path: string[]): any => {
   if (!info || !path.length) return undefined
@@ -1392,38 +1420,69 @@ function SetupWizard() {
     const overrideInfo = fieldOverrides[fieldKey]
     const discoveryValue = getDiscoveryValue(previewData?.discovered_info, config.path)
     const formValue = form.getFieldValue(config.formField)
+    const previewReady = Boolean(previewData)
+
     if (overrideInfo) {
       return {
         value: overrideInfo.overrideValue,
-        source: 'override',
+        source: 'user_override',
         originalValue: overrideInfo.originalValue,
       }
     }
-    if (!isNil(discoveryValue)) {
-      return {
-        value: discoveryValue,
-        source: 'auto',
-        originalValue: discoveryValue,
+
+    const hasDiscoveryValue = !isNil(discoveryValue)
+    const hasFormValue = !isNil(formValue)
+    let value: any = null
+    let source: FieldValueSource = 'planned'
+
+    if (hasDiscoveryValue) {
+      value = discoveryValue
+      source = 'auto_success'
+    } else if (hasFormValue) {
+      value = formValue
+      source = 'user_input'
+    } else {
+      value = null
+      source = previewReady ? 'auto_failed' : 'planned'
+    }
+
+    if (config.role === 'standby' && fieldKey.startsWith('standby_')) {
+      const primaryKey = `primary_${fieldKey.replace('standby_', '')}` as OverrideFieldKey
+      const primaryConfig = FIELD_OVERRIDE_CONFIG[primaryKey]
+      if (primaryConfig) {
+        const primaryOverride = fieldOverrides[primaryKey]
+        let primaryValue = primaryOverride ? primaryOverride.overrideValue : undefined
+        if (isNil(primaryValue)) {
+          primaryValue = getDiscoveryValue(previewData?.discovered_info, primaryConfig.path)
+        }
+        if (isNil(primaryValue)) {
+          const primaryFormValue = form.getFieldValue(primaryConfig.formField)
+          if (!isNil(primaryFormValue)) {
+            primaryValue = primaryFormValue
+          }
+        }
+        if (!isNil(value) && !isNil(primaryValue)) {
+          const valuesMatch = typeof value === 'string' && typeof primaryValue === 'string'
+            ? value.trim() === primaryValue.trim()
+            : Object.is(value, primaryValue)
+          if (valuesMatch) {
+            source = 'inherit_primary'
+          }
+        }
       }
     }
-    if (!isNil(formValue)) {
-      return {
-        value: formValue,
-        source: 'user',
-        originalValue: discoveryValue,
-      }
-    }
+
     return {
-      value: null,
-      source: 'auto',
+      value,
+      source,
       originalValue: discoveryValue,
     }
   }
 
-  const normalizeDiscoveryStatus = (raw?: any): DiscoveryStatus => {
+  const normalizeDiscoveryStatus = (raw?: any): StatusTagType => {
     if (!raw) return 'unknown'
-    const keys = Object.keys(DISCOVERY_STATUS_META) as DiscoveryStatus[]
-    return keys.includes(raw as DiscoveryStatus) ? raw as DiscoveryStatus : 'unknown'
+    const keys = Object.keys(DISCOVERY_STATUS_META) as StatusTagType[]
+    return keys.includes(raw as StatusTagType) ? raw as StatusTagType : 'unknown'
   }
 
   const mapConnectivityToStatus = (value?: string): DiscoveryStatus => {
@@ -1435,7 +1494,24 @@ function SetupWizard() {
     return 'partial'
   }
 
-  const renderStatusTag = (status: DiscoveryStatus) => {
+  const mapPathStatusToStatus = (pathStatus?: string): StatusTagType | undefined => {
+    if (!pathStatus) return undefined
+    if (pathStatus === 'not_exists') return 'failed'
+    if (pathStatus === 'not_writable') return 'warning'
+    if (pathStatus === 'ok' || pathStatus === 'ok_exists_files') return 'success'
+    return 'partial'
+  }
+
+  const mapStatusToSource = (baseSource?: FieldValueSource, status?: StatusTagType): FieldValueSource | undefined => {
+    if (!baseSource) return undefined
+    if (baseSource !== 'auto_success') return baseSource
+    if (!status) return 'auto_success'
+    if (status === 'failed' || status === 'unknown') return 'auto_failed'
+    if (status === 'warning' || status === 'timeout' || status === 'partial') return 'auto_failed'
+    return 'auto_success'
+  }
+
+  const renderStatusTag = (status: StatusTagType) => {
     const meta = DISCOVERY_STATUS_META[status]
     return (
       <Tag style={{ borderColor: meta.color, color: meta.color, margin: 0 }}>
@@ -1452,9 +1528,12 @@ function SetupWizard() {
     editableKey,
     extra,
     rowKey,
+    customValue,
   }: FieldValueRowProps) => {
     const formattedValue = formatValue(value)
+    const displayValue = customValue ?? formattedValue
     const computedKey = rowKey || `${label}-${editableKey ?? ''}`
+    const actualSource = mapStatusToSource(source, status)
     return (
       <div key={computedKey} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
@@ -1468,10 +1547,10 @@ function SetupWizard() {
           }}
         >
           <Space size={4} wrap align="center">
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>{formattedValue}</span>
-            {source && (
-              <Tag style={{ borderColor: VALUE_SOURCE_TAGS[source].color, color: VALUE_SOURCE_TAGS[source].color, margin: 0 }}>
-                {VALUE_SOURCE_TAGS[source].label}
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>{displayValue}</span>
+            {actualSource && (
+              <Tag style={{ borderColor: VALUE_SOURCE_TAGS[actualSource].color, color: VALUE_SOURCE_TAGS[actualSource].color, margin: 0 }}>
+                {VALUE_SOURCE_TAGS[actualSource].label}
               </Tag>
             )}
             {status && renderStatusTag(status)}
@@ -1639,25 +1718,25 @@ function SetupWizard() {
           rowKey: `${role}-hostname`,
           label: '主机名',
           value: hostInfo?.hostname,
-          source: 'auto',
+          source: hostInfo?.hostname ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
           rowKey: `${role}-ip`,
           label: 'IP 地址',
           value: hostInfo?.ip_address,
-          source: 'auto',
+          source: hostInfo?.ip_address ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
           rowKey: `${role}-os`,
           label: '操作系统',
           value: hostInfo?.os_version || hostInfo?.os_type,
-          source: 'auto',
+          source: (hostInfo?.os_version || hostInfo?.os_type) ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
           rowKey: `${role}-ssh`,
           label: 'SSH 用户',
           value: sshUser,
-          source: 'user',
+          source: 'user_input',
         })}
       </Space>
     )
@@ -1697,25 +1776,39 @@ function SetupWizard() {
             rowKey: `${role}-version`,
             label: 'Oracle 版本',
             value: oracleInfo?.version,
-            source: 'auto',
+            source: oracleInfo?.version ? 'auto_success' : 'auto_failed',
           })}
           {renderFieldValueRow({
             rowKey: `${role}-base`,
             label: 'ORACLE_BASE',
             value: oracleInfo?.oracle_base,
-            source: 'auto',
+            source: oracleInfo?.oracle_base ? 'auto_success' : 'auto_failed',
           })}
           {renderFieldValueRow({
             rowKey: `${role}-sid`,
             label: 'SID',
             value: oracleInfo?.oracle_sid,
-            source: 'auto',
+            source: oracleInfo?.oracle_sid ? 'auto_success' : 'auto_failed',
           })}
           {renderFieldValueRow({
             rowKey: `${role}-listener`,
             label: '监听端口',
             value: oracleInfo?.listener_port,
-            source: 'auto',
+            source: oracleInfo?.listener_port ? 'auto_success' : 'auto_failed',
+          })}
+          {role === 'primary' && renderFieldValueRow({
+            rowKey: 'primary-archive-mode',
+            label: '归档模式',
+            value: (info.primary_db as any)?.archive_mode,
+            source: (info.primary_db as any)?.archive_mode ? 'auto_success' : 'auto_failed',
+            status: oracleStatus,
+          })}
+          {role === 'primary' && renderFieldValueRow({
+            rowKey: 'primary-force-logging',
+            label: 'Force Logging',
+            value: (info.primary_db as any)?.force_logging,
+            source: (info.primary_db as any)?.force_logging != null ? 'auto_success' : 'auto_failed',
+            status: oracleStatus,
           })}
           {overrideFields.map((fieldKey) => renderOverrideFieldRow(fieldKey))}
         </Space>
@@ -1727,6 +1820,13 @@ function SetupWizard() {
     const info = previewData?.discovered_info
     const network = info?.network || {}
     const storage = info?.storage || {}
+    const storageMeta = storage as Record<string, any>
+    const primaryDataStatus = storageMeta?.primary_data_path_status ?? storageMeta?.primary_data_dir_status
+    const standbyDataStatus = storageMeta?.standby_data_path_status ?? storageMeta?.standby_data_dir_status
+    const primaryLogStatus = storageMeta?.primary_log_path_status ?? storageMeta?.primary_log_dir_status
+    const standbyLogStatus = storageMeta?.standby_log_path_status ?? storageMeta?.standby_log_dir_status
+    const primaryLogPath = storage.primary_redo_path || storage.primary_redo_file_path
+    const standbyLogPath = storage.standby_redo_path || storage.standby_redo_file_path
     const conflicts = info?.conflicts || []
     const precheckWarnings = (previewData?.precheck_results || []).filter((item) => item.result !== 'pass')
     const featureFlagWarnings = precheckWarnings.filter((item) => FEATURE_FLAG_KEYS.includes(item.check_name as any))
@@ -1743,32 +1843,35 @@ function SetupWizard() {
                 rowKey: 'network-primary-listener',
                 label: '主库监听端口',
                 value: network.primary_listener_port,
-                source: 'auto',
+                source: 'auto_success',
+                status: network.primary_listener_port ? 'success' : 'unknown',
               })}
               {renderFieldValueRow({
                 rowKey: 'network-standby-listener',
                 label: '备库监听端口',
                 value: network.standby_listener_port,
-                source: 'auto',
+                source: 'auto_success',
+                status: network.standby_listener_port ? 'success' : 'unknown',
               })}
               {renderFieldValueRow({
                 rowKey: 'network-listener-status',
                 label: '主库监听状态',
                 value: network.primary_listener_status,
-                source: 'auto',
+                source: 'auto_success',
                 status: mapConnectivityToStatus(network.primary_listener_status),
               })}
               {renderFieldValueRow({
                 rowKey: 'network-log-transport',
                 label: '日志传输模式',
                 value: network.log_transport_mode,
-                source: 'auto',
+                source: 'auto_success',
+                status: network.log_transport_mode ? 'success' : 'unknown',
               })}
               {renderFieldValueRow({
                 rowKey: 'network-tns',
                 label: 'TNS 检查',
                 value: network.tns_check || '等待后端返回',
-                source: network.tns_check ? 'auto' : 'user',
+                source: network.tns_check ? 'auto_success' : 'planned',
                 status: mapConnectivityToStatus(network.tns_check),
                 extra: !network.tns_check ? (
                   <Tooltip title="后端尚未返回 TNS 检查结果">
@@ -1788,31 +1891,63 @@ function SetupWizard() {
                 rowKey: 'storage-primary-path',
                 label: '主库数据文件路径',
                 value: storage.data_files_path,
-                source: 'auto',
+                source: storage.data_files_path ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(primaryDataStatus),
+              })}
+              {renderFieldValueRow({
+                rowKey: 'storage-primary-writable',
+                label: '主库目录可写',
+                value: undefined,
+                source: storage.data_files_path ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(primaryDataStatus),
+                customValue: formatWritable(undefined, primaryDataStatus),
               })}
               {renderFieldValueRow({
                 rowKey: 'storage-standby-path',
                 label: '备库数据文件路径',
                 value: storage.standby_data_files_path,
-                source: 'auto',
+                source: storage.standby_data_files_path ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(standbyDataStatus),
+              })}
+              {renderFieldValueRow({
+                rowKey: 'storage-standby-writable',
+                label: '备库目录可写',
+                value: undefined,
+                source: storage.standby_data_files_path ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(standbyDataStatus),
+                customValue: formatWritable(undefined, standbyDataStatus),
+              })}
+              {primaryLogPath && renderFieldValueRow({
+                rowKey: 'storage-primary-log-path',
+                label: '主库日志文件路径',
+                value: primaryLogPath,
+                source: primaryLogPath ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(primaryLogStatus),
+              })}
+              {standbyLogPath && renderFieldValueRow({
+                rowKey: 'storage-standby-log-path',
+                label: '备库日志文件路径',
+                value: standbyLogPath,
+                source: standbyLogPath ? 'auto_success' : 'auto_failed',
+                status: mapPathStatusToStatus(standbyLogStatus),
               })}
               {renderFieldValueRow({
                 rowKey: 'storage-primary-usage',
                 label: '主库磁盘占用',
                 value: storage.primary_disk_usage,
-                source: 'auto',
+                source: storage.primary_disk_usage ? 'auto_success' : 'auto_failed',
               })}
               {renderFieldValueRow({
                 rowKey: 'storage-standby-usage',
                 label: '备库磁盘占用',
                 value: storage.standby_disk_usage,
-                source: 'auto',
+                source: storage.standby_disk_usage ? 'auto_success' : 'auto_failed',
               })}
               {renderFieldValueRow({
                 rowKey: 'storage-archive-policy',
                 label: '归档清理策略',
                 value: storage.archive_cleanup_policy || '未配置',
-                source: storage.archive_cleanup_policy ? 'auto' : 'user',
+                source: storage.archive_cleanup_policy ? 'auto_success' : 'user_input',
               })}
             </Space>
           </Col>

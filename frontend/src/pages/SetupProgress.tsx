@@ -36,7 +36,7 @@ const { Title, Text } = Typography
 
 const STAGE_DEFINITIONS = [
   { key: 'collect_input_and_validate', name: '收集输入并校验', description: '验证搭建所需的配置信息与输入参数' },
-  { key: 'remote_discovery', name: '远程环境发现', description: '连接主备主机并采集现状信息' },
+  { key: 'remote_discovery', name: '环境自动探测', description: '连接主备主机并采集 OS/Oracle/网络等环境信息' },
   { key: 'precheck', name: '运行前检查', description: '检查主库状态、归档模式、磁盘空间等依赖' },
   { key: 'generate_plan', name: '生成执行计划', description: '汇总检查结果，生成幂等执行计划' },
   { key: 'prepare_primary', name: '主库准备', description: '调整主库参数、准备必要文件' },

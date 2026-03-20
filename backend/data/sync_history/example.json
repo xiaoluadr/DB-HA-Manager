@@ -663,5 +663,925 @@
     "timestamp": "2026-03-13T07:16:48.627882+00:00",
     "lag_seconds": 0.0,
     "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:28:07.171859+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:29:07.723396+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:30:07.725596+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:31:08.200332+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:32:08.686857+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:33:08.689877+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:34:09.232403+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:35:09.728485+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:36:10.275837+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:37:10.279558+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:38:10.282473+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:39:10.733897+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:40:11.229803+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:41:11.233066+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:42:11.759492+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:43:11.762557+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:44:12.278667+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:45:12.281818+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:46:12.939936+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:47:13.404572+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:48:14.008875+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:49:14.602512+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:50:14.605033+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:51:15.163603+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:52:15.166304+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T04:53:51.732640+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:13:10.084289+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:14:10.086651+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:15:10.727248+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:16:11.300255+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:17:11.302928+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:18:11.855038+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:19:12.425624+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:20:12.428404+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:21:13.020249+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:22:13.519629+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:23:13.988475+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:24:14.483337+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:25:15.100664+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:26:15.578860+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:27:16.175990+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:28:16.180426+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:29:16.745220+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:30:16.750344+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:31:16.754240+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:32:17.496057+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:33:17.498731+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:34:18.059855+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:35:18.510153+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:36:18.943055+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:37:19.698283+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:38:20.322548+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:39:20.324822+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:40:20.937171+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:41:20.941165+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:42:20.946011+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:43:20.950101+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:44:20.954747+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:45:20.959387+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:46:20.961878+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:47:21.491767+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:48:22.008706+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T05:49:31.082924+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:46:24.700495+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:47:24.703123+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:48:24.708235+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:49:25.277064+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:50:25.798243+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:51:26.401543+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:52:26.404159+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:53:26.411353+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:54:26.414106+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:55:27.054381+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:56:27.058433+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:57:27.658526+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:58:28.205692+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T06:59:28.807913+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:00:28.810676+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:01:29.457877+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:02:29.461912+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:03:29.464265+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:04:30.171859+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:05:30.174632+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:06:30.177349+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:07:30.735938+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:08:31.213590+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:09:31.767870+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:10:31.770699+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:11:32.377177+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:12:32.380014+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:13:33.043251+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:14:33.047570+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:15:33.617169+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:16:34.194103+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:17:34.854233+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:18:34.858369+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:19:35.490569+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:20:36.154169+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:21:36.588977+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:22:37.267869+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:23:37.271875+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:24:37.909806+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:25:38.332557+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:26:38.335468+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:27:38.906141+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:28:39.386548+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:29:39.912194+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:30:40.612238+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:31:40.615619+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:32:40.620081+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:33:41.266155+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:34:41.686218+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:35:42.256882+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:36:42.260973+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:37:42.867253+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:38:43.479612+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:39:43.482357+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:40:43.486630+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:41:44.053707+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:42:44.614341+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:43:45.118117+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:44:45.736650+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:45:45.742588+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:46:45.747033+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:47:46.346832+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:48:46.871647+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:49:47.398676+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:50:47.971391+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:51:48.555656+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:52:48.559255+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:53:49.198655+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:54:49.201715+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:55:49.204373+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:56:49.207108+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:57:49.210404+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:58:49.214041+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T07:59:49.818265+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:00:49.823023+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:01:49.826877+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:02:49.830273+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:03:50.425651+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:04:51.097424+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:05:51.522237+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:06:51.937362+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:07:51.941638+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:08:51.944440+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:09:51.947467+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:10:51.952455+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:11:51.957764+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:12:51.960676+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:13:52.583874+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:14:52.587773+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:15:53.295312+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:16:53.299593+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:17:53.304952+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:18:53.310592+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:19:53.314424+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:20:53.318461+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:21:53.322158+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:22:53.325094+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:23:53.731942+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:24:53.736716+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:25:53.741376+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:26:53.745267+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:27:53.748811+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:28:53.754112+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:29:53.758826+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:30:53.763254+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:31:53.767324+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:32:53.771316+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:33:53.776136+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:34:53.780649+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:35:54.355211+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:36:54.925225+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:37:55.497119+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:38:55.905291+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:39:55.909660+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:40:55.914262+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:41:56.553318+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:42:56.557929+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:43:56.562471+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:44:56.566977+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:45:57.229306+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
+  },
+  {
+    "timestamp": "2026-03-16T08:46:57.232814+00:00",
+    "lag_seconds": 0.0,
+    "status": "SYNCED"
   }
 ]

@@ -3,6 +3,15 @@
  * 根据 OpenAPI 规范生成
  */
 
+// 共享枚举
+export type DuplicateMode = 'backup' | 'active_duplicate'
+export type ProtectionMode =
+  | 'MAXIMUM PERFORMANCE'
+  | 'MAXIMUM AVAILABILITY'
+  | 'MAXIMUM PROTECTION'
+export type LogTransportMode = 'ASYNC' | 'SYNC'
+export type ArchiveCleanupPolicy = 'none' | 'days' | 'size' | 'files'
+
 // 基础信息
 export interface ClusterInfo {
   cluster_id: string
@@ -327,6 +336,60 @@ export interface PreviewResponse {
   preview_generated_at: string
   is_demo?: boolean
   error_type?: string
+}
+
+export interface PreviewRequest {
+  primary_host: string
+  primary_ssh_port: number
+  primary_ssh_user: string
+  primary_ssh_auth_type: string
+  primary_ssh_key_path?: string
+  primary_ssh_password?: string
+  standby_host: string
+  standby_ssh_port: number
+  standby_ssh_user: string
+  standby_ssh_auth_type: string
+  standby_ssh_key_path?: string
+  standby_ssh_password?: string
+  oracle_sid: string
+  oracle_home: string
+  sys_password?: string
+  db_name: string
+  db_unique_name_primary?: string
+  db_unique_name_standby?: string
+  storage_type?: string
+  duplicate_mode: DuplicateMode
+  protection_mode: ProtectionMode
+  log_transport_mode?: LogTransportMode
+  enable_realtime_apply?: boolean
+  auto_create_srl?: boolean
+  data_files_path?: string
+  data_file_path_strategy?: string
+  redo_file_path_strategy?: string
+  primary_data_file_path?: string
+  standby_data_file_path?: string
+  primary_redo_file_path?: string
+  standby_redo_file_path?: string
+  archivelog_path: string
+  standby_archive_path: string
+  archive_cleanup_policy: ArchiveCleanupPolicy
+  archive_cleanup_param?: number
+  primary_sid?: string
+  primary_oracle_home?: string
+  primary_oracle_base?: string
+  primary_db_unique_name?: string
+  primary_listener_port?: number
+  primary_service_name?: string
+  primary_storage_type?: string
+  primary_is_cdb?: boolean
+  standby_sid?: string
+  standby_oracle_home?: string
+  standby_oracle_base?: string
+  standby_db_unique_name?: string
+  standby_listener_port?: number
+  standby_service_name?: string
+  standby_storage_type?: string
+  standby_is_cdb?: boolean
 }
 
 export interface FieldOverrideInfo {

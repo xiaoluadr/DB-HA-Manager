@@ -1,0 +1,30 @@
+
+> db-ha-manager-frontend@0.1.0 dev
+> vite
+
+
+  VITE v5.4.21  ready in 178 ms
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://192.168.32.130:3000/
+  ➜  Network: http://192.168.123.129:3000/
+Killed
+
+> db-ha-manager-frontend@0.1.0 dev
+> vite
+
+
+  VITE v5.4.21  ready in 235 ms
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://192.168.32.130:3000/
+  ➜  Network: http://192.168.123.129:3000/
+12:53:38 PM [vite] http proxy error: /api/tasks
+Error: connect ECONNREFUSED 127.0.0.1:8000
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1645:16)
+12:58:43 PM [vite] http proxy error: /api/tasks
+Error: connect ECONNREFUSED 127.0.0.1:8000
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1645:16)
+12:59:44 PM [vite] http proxy error: /api/tasks
+Error: connect ECONNREFUSED 127.0.0.1:8000
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1645:16)

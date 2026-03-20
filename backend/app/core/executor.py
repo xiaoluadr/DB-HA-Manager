@@ -1,7 +1,10 @@
 """执行器模块 - SSH 和 SQL 执行"""
 
 import asyncio
+import os
 import shlex
+import tempfile
+import uuid
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -294,41 +297,94 @@ class SqlExecutor:
         self,
         sql: str,
         as_sysdba: bool = True,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        environment: Optional[Dict[str, str]] = None,
+        connect_identifier: Optional[str] = None
     ) -> CommandResult:
         """
         执行 SQL 语句
-
-        Args:
-            sql: 要执行的 SQL
-            as_sysdba: 是否以 SYSDBA 权限执行
-            timeout: 超时时间（秒）
-
-        Returns:
-            执行结果
         """
-        # 构建 SQL*Plus 命令
-        sysdba_option = " / as sysdba" if as_sysdba else ""
-        sqlplus_cmd = f"sqlplus -S /nolog"
+        # 构建 SQL*Plus 连接命令
+        if as_sysdba:
+            sqlplus_cmd = 'sqlplus -s "/ as sysdba"'
+        else:
+            sqlplus_cmd = 'sqlplus -s "/"'
+        if connect_identifier:
+            sqlplus_cmd = f'sqlplus -s "{connect_identifier}"'
 
-        # 构建 SQL 脚本
-        sql_script = f"""CONNECT / AS SYSDBA
-SET HEADING OFF
+        # 构建 SQL 脚本内容（不包含 CONNECT，直接用 -s 连接）
+        normalized_sql = sql.strip()
+        if not normalized_sql.endswith(";"):
+            normalized_sql = f"{normalized_sql};"
+        sql_script = f"""SET HEADING OFF
 SET FEEDBACK OFF
-SET SERVEROUTPUT ON
-{sql}
+SET PAGESIZE 0
+SET VERIFY OFF
+SET ECHO OFF
+SET TERMOUT ON
+SET TRIMSPOOL ON
+SET LINESIZE 32767
+{normalized_sql}
 EXIT
 """
 
-        # 通过管道执行
-        full_command = f'echo "{sql_script}" | {sqlplus_cmd}'
+        # 添加日志
+        logger.debug(f"execute_sql SQL 脚本内容:\n{sql_script}")
 
-        result = self.remote.execute(
-            full_command,
-            environment=self.environment,
-            timeout=timeout
-        )
-        return result
+        # 合并环境变量
+        merged_env = dict(self.environment)
+        if environment:
+            merged_env.update(environment)
+
+        local_temp_path = None
+        remote_temp_path = f"/tmp/sql_exec_{uuid.uuid4().hex}.sql"
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as temp_file:
+                temp_file.write(sql_script)
+                local_temp_path = temp_file.name
+
+            logger.debug(f"execute_sql 本地临时文件: {local_temp_path}")
+
+            if not self.remote.upload_file(local_temp_path, remote_temp_path):
+                logger.error("execute_sql 上传 SQL 文件失败")
+                return CommandResult(
+                    success=False,
+                    stdout="",
+                    stderr=f"上传 SQL 文件失败: {local_temp_path} -> {remote_temp_path}",
+                    exit_code=1,
+                )
+
+            full_command = f"{sqlplus_cmd} @{shlex.quote(remote_temp_path)}"
+            logger.debug("execute_sql 使用 sqlplus @file 方式执行")
+
+            result = self.remote.execute(
+                full_command,
+                environment=merged_env,
+                timeout=timeout
+            )
+
+            logger.debug(f"execute_sql 原始 stdout: {repr((result.stdout or '')[:200])}")
+            logger.debug(f"execute_sql 原始 stderr: {repr((result.stderr or '')[:200])}")
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"execute_sql 执行异常: {exc}")
+            return CommandResult(
+                success=False,
+                stdout="",
+                stderr=str(exc),
+                exit_code=-1,
+            )
+        finally:
+            if remote_temp_path:
+                self.remote.execute(
+                    f"rm -f {shlex.quote(remote_temp_path)}",
+                    timeout=10
+                )
+            if local_temp_path:
+                try:
+                    os.unlink(local_temp_path)
+                except FileNotFoundError:
+                    pass
 
     def execute_sql_file(
         self,
@@ -347,10 +403,12 @@ EXIT
         Returns:
             执行结果
         """
-        sysdba_option = " / as sysdba" if as_sysdba else ""
-        sqlplus_cmd = f"sqlplus -S /nolog"
+        if as_sysdba:
+            sqlplus_cmd = 'sqlplus -s "/ as sysdba"'
+        else:
+            sqlplus_cmd = 'sqlplus -s "/"'
 
-        full_command = f'cat "{sql_file}" | {sqlplus_cmd}'
+        full_command = f"{sqlplus_cmd} @{shlex.quote(sql_file)}"
 
         result = self.remote.execute(
             full_command,
@@ -385,6 +443,68 @@ EXIT
                 return lines[0]
 
         return None
+
+    def query_multi_lines(
+        self,
+        sql: str,
+        as_sysdba: bool = True,
+        timeout: Optional[int] = None,
+        environment: Optional[Dict[str, str]] = None
+    ) -> List[str]:
+        """
+        查询多行结果
+
+        Args:
+            sql: 查询 SQL
+            as_sysdba: 是否以 SYSDBA 权限执行
+            timeout: 超时时间
+            environment: 环境变量
+
+        Returns:
+            查询结果行列表（去除空行）
+        """
+        result = self.execute_sql(sql, as_sysdba, timeout, environment)
+
+        if not result.success or not result.stdout:
+            return []
+
+        return self._extract_multi_lines(result.stdout)
+
+    @staticmethod
+    def _extract_multi_lines(output: str) -> List[str]:
+        """
+        从 SQL*Plus 输出中提取多行结果
+
+        清理内容：
+        - SQL*Plus banner 行
+        - Copyright 行
+        - Connected. / Disconnected from Oracle 行
+        - SQL> 提示符
+        - 空行
+        """
+        if not output:
+            return []
+
+        lines: List[str] = []
+        keywords_to_skip = [
+            "sql*plus:", "release", "production", "enterprise edition",
+            "with partitioning", "olap", "data mining", "real application testing",
+            "options", "copyright", "(c)", "connected.", "disconnected from",
+            "sql>", "oracle database"
+        ]
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            line_lower = stripped.lower()
+            if any(keyword in line_lower for keyword in keywords_to_skip):
+                continue
+
+            lines.append(stripped)
+
+        return lines
 
     def query_to_dict(self, sql: str, as_sysdba: bool = True) -> List[Dict[str, Any]]:
         """
