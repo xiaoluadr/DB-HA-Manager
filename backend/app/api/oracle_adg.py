@@ -2,6 +2,7 @@
 
 # 变更说明: backend/app/api/oracle_adg.py 修复预览接口 500，涉及 KeyError 规避、日志增强与错误信息细化。
 
+import re
 import shlex
 import socket
 from enum import Enum
@@ -470,7 +471,7 @@ class OraclePreviewExecutor:
         discovery.network["primary_listener_port"] = self._resolve_primary_listener_port()
         discovery.network["standby_listener_port"] = self._resolve_standby_listener_port()
         discovery.network["log_transport_mode"] = self._normalized_log_transport_mode()
-        discovery.network["tns_check"] = "ok"  # 简化：默认可连
+        discovery.network["tns_check"] = None
 
     def _discover_storage(self, discovery: DiscoveryInfo):
         """探测存储信息"""
@@ -566,6 +567,47 @@ class OraclePreviewExecutor:
     def precheck(self, discovery: DiscoveryInfo) -> List[PrecheckResult]:
         """执行预检查"""
         results: List[PrecheckResult] = []
+        primary_sid = self._resolve_primary_sid()
+        standby_sid = self._resolve_standby_sid()
+        primary_home = self._resolve_primary_oracle_home()
+        standby_home = self._resolve_standby_oracle_home()
+
+        def append(check: Optional[PrecheckResult]):
+            if check:
+                results.append(check)
+
+        append(self._check_instance_process('primary', primary_sid))
+        append(self._check_instance_process('standby', standby_sid))
+        append(self._check_oracle_home_mapping('primary', primary_sid, primary_home))
+        append(self._check_oracle_home_mapping('standby', standby_sid, standby_home))
+
+        primary_listener_check = self._check_listener_status(
+            role='primary',
+            oracle_home=primary_home,
+            expected_port=self._resolve_primary_listener_port(),
+            discovery=discovery,
+        )
+        primary_listener_passed = primary_listener_check is not None and primary_listener_check.result == 'pass'
+        if primary_listener_check:
+            results.append(primary_listener_check)
+
+        standby_listener_check = self._check_listener_status(
+            role='standby',
+            oracle_home=standby_home,
+            expected_port=self._resolve_standby_listener_port(),
+            discovery=discovery,
+        )
+        if standby_listener_check:
+            results.append(standby_listener_check)
+
+        if primary_listener_passed:
+            append(self._check_primary_tns_connectivity(primary_home, self._resolve_primary_listener_port(), discovery))
+
+        append(self._check_primary_custom_path_alignment('data'))
+        append(self._check_primary_custom_path_alignment('redo'))
+        append(self._check_standby_directory_ready('data'))
+        append(self._check_standby_directory_ready('redo'))
+
         results.append(self._check_archive_mode(discovery))
         results.append(self._check_force_logging(discovery))
         results.append(self._check_version_compatibility(discovery))
@@ -579,6 +621,298 @@ class OraclePreviewExecutor:
         results.append(self._check_duplicate_prerequisites(discovery))
         results.extend(self._feature_flag_warnings())
         return results
+
+    def _check_instance_process(
+        self,
+        role: str,
+        sid: Optional[str],
+    ) -> Optional[PrecheckResult]:
+        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
+        if not executor or not sid:
+            return None
+        normalized_sid = re.sub(r"[^A-Za-z0-9_$-]", "", sid) or sid
+        pattern = f"ora_pmon_{normalized_sid}"
+        command = f"ps -ef | grep -i {shlex.quote(pattern)} | grep -v grep || true"
+        result = executor.execute(command, timeout=10)
+        stdout = (result.stdout or "").strip()
+        is_running = bool(stdout)
+        label = "主库" if role == 'primary' else "备库"
+        message = f"{label} PMON 进程检查"
+        evidence = {"sid": normalized_sid, "stdout": stdout}
+
+        if role == 'primary':
+            status = 'pass' if is_running else 'fail'
+            suggestion = None if is_running else "请启动主库实例，确保 PMON 进程正常运行"
+            blocking = not is_running
+            risk = RiskLevel.CRITICAL if not is_running else RiskLevel.LOW
+        else:
+            if is_running:
+                status = 'warn'
+                suggestion = "检测到备库同名实例，请确认不会与待创建的备库冲突"
+                risk = RiskLevel.MEDIUM
+            else:
+                status = 'pass'
+                suggestion = None
+                risk = RiskLevel.LOW
+            blocking = False
+
+        return PrecheckResult(
+            check_name=f"{role}_pmon_process",
+            category="process",
+            result=status,
+            message=message,
+            evidence=evidence,
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+        )
+
+    def _check_oracle_home_mapping(
+        self,
+        role: str,
+        sid: Optional[str],
+        oracle_home: Optional[str],
+    ) -> Optional[PrecheckResult]:
+        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
+        if not executor or not sid or not oracle_home:
+            return None
+        result = executor.execute("cat /etc/oratab 2>/dev/null", timeout=10)
+        lines = [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        normalized_sid = sid.strip().upper()
+        mapping_line = next((line for line in lines if line.split(":")[0].strip().upper() == normalized_sid), None)
+        label = "主库" if role == 'primary' else "备库"
+        message = f"{label} ORACLE_HOME 映射检查"
+        evidence = {"sid": normalized_sid, "oracle_home": oracle_home, "oratab_line": mapping_line}
+
+        if not result.success and not lines:
+            status = 'warn' if role == 'standby' else 'fail'
+            suggestion = "无法读取 /etc/oratab，请确认文件存在并可访问"
+            blocking = role == 'primary'
+            risk = RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH
+        elif not mapping_line:
+            status = 'warn' if role == 'standby' else 'fail'
+            suggestion = f"/etc/oratab 中未找到 SID {normalized_sid} 的记录"
+            blocking = role == 'primary'
+            risk = RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH
+        else:
+            recorded_home = mapping_line.split(":")[1].strip()
+            matches = recorded_home.rstrip("/") == oracle_home.rstrip("/")
+            status = 'pass' if matches else ('warn' if role == 'standby' else 'fail')
+            suggestion = None if matches else "请确认 /etc/oratab 中的 ORACLE_HOME 与输入一致"
+            blocking = not matches and role == 'primary'
+            risk = RiskLevel.LOW if matches else (RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH)
+            evidence["oratab_home"] = recorded_home
+
+        return PrecheckResult(
+            check_name=f"{role}_oratab_mapping",
+            category="configuration",
+            result=status,
+            message=message,
+            evidence=evidence,
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+        )
+
+    def _check_listener_status(
+        self,
+        role: str,
+        oracle_home: Optional[str],
+        expected_port: Optional[int],
+        discovery: DiscoveryInfo,
+    ) -> Optional[PrecheckResult]:
+        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
+        if not executor or not oracle_home:
+            return None
+        env = {
+            "ORACLE_HOME": oracle_home,
+            "PATH": f"{oracle_home}/bin:$PATH",
+            "LD_LIBRARY_PATH": f"{oracle_home}/lib:$LD_LIBRARY_PATH",
+        }
+        result = executor.execute("lsnrctl status", environment=env, timeout=60)
+        stdout = (result.stdout or "").strip()
+        ports = {int(match) for match in re.findall(r"PORT\s*=\s*(\d+)", stdout)}
+        has_expected_port = expected_port in ports if expected_port else bool(ports)
+        label = "主库" if role == 'primary' else "备库"
+        message = f"{label} Listener 状态检查"
+        status_key = "primary_listener_status" if role == 'primary' else "standby_listener_status"
+        discovery.network[status_key] = "READY" if (result.success and has_expected_port) else "NOT READY"
+
+        if not result.success:
+            status = 'fail' if role == 'primary' else 'warn'
+            suggestion = "请确认监听进程已启动，并检查 listener.ora"
+        elif not has_expected_port:
+            status = 'fail' if role == 'primary' else 'warn'
+            suggestion = "监听端口与表单输入不符，请核对 listener.ora"
+        else:
+            status = 'pass'
+            suggestion = None
+
+        blocking = status == 'fail' and role == 'primary'
+        risk = RiskLevel.LOW if status == 'pass' else (RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH)
+
+        return PrecheckResult(
+            check_name=f"{role}_listener_status",
+            category="connectivity",
+            result=status,
+            message=message,
+            evidence={
+                "detected_ports": sorted(ports),
+                "expected_port": expected_port,
+                "stdout": stdout[:400],
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+        )
+
+    def _check_primary_tns_connectivity(
+        self,
+        oracle_home: Optional[str],
+        listener_port: Optional[int],
+        discovery: DiscoveryInfo,
+    ) -> Optional[PrecheckResult]:
+        password = (self.request.sys_password or "").strip()
+        service_name = (self.request.primary_service_name or "").strip()
+        if not password or not service_name or not oracle_home or not self.primary_ssh:
+            return None
+        port = listener_port or 1521
+        env = {
+            "ORACLE_HOME": oracle_home,
+            "PATH": f"{oracle_home}/bin:$PATH",
+            "LD_LIBRARY_PATH": f"{oracle_home}/lib:$LD_LIBRARY_PATH",
+            "TNS_TEST_PASS": password,
+        }
+        sanitized_service = re.sub(r"[^A-Za-z0-9._-]", "", service_name)
+        command = (
+            "cat <<SQL | sqlplus -s /nolog\n"
+            f"connect sys/\"$TNS_TEST_PASS\"@127.0.0.1:{port}/{sanitized_service} as sysdba\n"
+            "select 1 from dual;\n"
+            "exit;\n"
+            "SQL"
+        )
+        result = self.primary_ssh.execute(command, environment=env, timeout=45)
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        success = result.success and "1" in [line.strip() for line in stdout.splitlines() if line.strip()]
+        discovery.network["tns_check"] = "success" if success else "failed"
+        status = 'pass' if success else 'warn'
+        suggestion = None if success else "TNS 连接失败，请检查 SYS 密码、service_name 或监听配置"
+        risk = RiskLevel.LOW if success else RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name="primary_tns_connectivity",
+            category="connectivity",
+            result=status,
+            message=f"主库 SYS@127.0.0.1:{port}/{sanitized_service} 连通性",
+            evidence={"stdout": stdout[:400], "stderr": stderr[:400], "port": port, "service_name": sanitized_service},
+            suggestion=suggestion,
+            blocking=False,
+            risk_level=risk,
+        )
+
+    def _check_primary_custom_path_alignment(self, path_type: str) -> Optional[PrecheckResult]:
+        strategy = (self.request.data_file_path_strategy if path_type == 'data' else self.request.redo_file_path_strategy) or ''
+        if strategy.lower() != 'custom' or not self.primary_sql:
+            return None
+        path = (self.request.primary_data_file_path if path_type == 'data' else self.request.primary_redo_file_path) or ''
+        if not path:
+            return None
+        normalized_path = path.rstrip("/").upper()
+        escaped_path = normalized_path.replace("'", "''")
+        if path_type == 'data':
+            sql = (
+                f"SELECT COUNT(*) FROM v$datafile "
+                f"WHERE UPPER(file_name) NOT LIKE '{escaped_path}%'"
+            )
+            check_name = "primary_data_path_alignment"
+            message = "主库数据文件路径与输入一致性"
+        else:
+            sql = (
+                f"SELECT COUNT(*) FROM v$logfile "
+                f"WHERE UPPER(member) NOT LIKE '{escaped_path}%'"
+            )
+            check_name = "primary_redo_path_alignment"
+            message = "主库联机日志路径与输入一致性"
+        mismatch = self.primary_sql.query_single_value(sql) or "0"
+        mismatch_count = int(mismatch.strip() or "0")
+        status = 'pass' if mismatch_count == 0 else 'warn'
+        suggestion = None if mismatch_count == 0 else "请确认主库实际路径与自定义路径一致，避免后续 Duplicate 失败"
+        risk = RiskLevel.LOW if mismatch_count == 0 else RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name=check_name,
+            category="storage",
+            result=status,
+            message=message,
+            evidence={"expected_prefix": normalized_path, "mismatch_count": mismatch_count},
+            suggestion=suggestion,
+            blocking=False,
+            risk_level=risk,
+        )
+
+    def _check_standby_directory_ready(self, directory_type: str) -> Optional[PrecheckResult]:
+        strategy = (self.request.data_file_path_strategy if directory_type == 'data' else self.request.redo_file_path_strategy) or ''
+        if strategy.lower() != 'custom' or not self.standby_ssh:
+            return None
+        path = (self.request.standby_data_file_path if directory_type == 'data' else self.request.standby_redo_file_path) or ''
+        normalized = path.strip()
+        if not normalized or normalized.startswith("+"):
+            return None
+        meta = self._inspect_path(self.standby_ssh, normalized)
+        if not meta:
+            return None
+        status_flag = meta.get("status")
+        has_files = bool(meta.get("has_files"))
+        label = "数据文件" if directory_type == 'data' else "联机日志"
+        check_name = f"standby_{directory_type}_dir_status"
+        message = f"备库{label}目录可用性"
+
+        if status_flag == "ok" and not has_files:
+            status = 'pass'
+            suggestion = None
+            risk = RiskLevel.LOW
+            blocking = False
+        elif status_flag == "not_exists":
+            status = 'fail'
+            suggestion = "目录不存在，请预先创建并授权 oracle 用户"
+            risk = RiskLevel.HIGH
+            blocking = True
+        elif status_flag == "not_writable":
+            status = 'warn'
+            suggestion = "目录不可写，请检查权限或磁盘挂载状态"
+            risk = RiskLevel.MEDIUM
+            blocking = False
+        else:
+            status = 'warn'
+            suggestion = "目录已存在文件，请确认不会覆盖生产数据"
+            risk = RiskLevel.MEDIUM
+            blocking = False
+
+        if has_files and status == 'pass':
+            status = 'warn'
+            suggestion = suggestion or "目录中存在文件，请确保不影响后续 Duplicate"
+            risk = RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name=check_name,
+            category="storage",
+            result=status,
+            message=message,
+            evidence={
+                "path": normalized,
+                "status": status_flag,
+                "writable": meta.get("writable"),
+                "has_files": has_files,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+        )
 
     def _check_archive_mode(self, discovery: DiscoveryInfo) -> PrecheckResult:
         """检查归档模式"""

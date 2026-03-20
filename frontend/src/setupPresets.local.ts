@@ -1,45 +1,118 @@
-export const SETUP_WIZARD_PRESET = {
-  // 主备库配置
+// 标准联调样例配置
+export interface SetupPresetData {
+  // 主库信息
+  primaryHost: string
+  primaryPort: number
+  primarySshUser: string
+  primarySshAuthType: 'key' | 'password'
+  primarySshKeyPath?: string
+  primarySshPassword?: string
+
+  // 主库 Oracle 信息
+  primaryOracleHome: string
+  primaryDbUniqueName: string
+  primaryOracleBase?: string
+  primarySysPassword?: string
+  primaryListenerPort: number
+  primaryServiceName?: string
+  primaryStorageType: 'fs' | 'asm'
+  primaryIsCdb: boolean
+  primarySid?: string
+
+  // 备库信息
+  standbyHost: string
+  standbyPort: number
+  standbySshUser: string
+  standbySshAuthType: 'key' | 'password'
+  standbySshKeyPath?: string
+  standbySshPassword?: string
+
+  // 备库 Oracle 信息
+  standbyOracleHome: string
+  standbySid: string
+  standbyDbUniqueName: string
+  standbyListenerPort: number
+  standbyServiceName?: string
+  standbyStorageType: 'fs' | 'asm'
+  standbyIsCdb: boolean
+
+  // 搭建配置
+  duplicateMode: 'active' | 'backup'
+  protectionMode: 'MAXIMUM PERFORMANCE' | 'MAXIMUM AVAILABILITY' | 'MAXIMUM PROTECTION'
+  logTransportMode: 'ASYNC' | 'SYNC'
+  enableRealtimeApply: boolean
+  autoCreateSrl: boolean
+
+  // 路径策略
+  dataFilePathStrategy: 'custom' | 'auto_same' | 'auto_append'
+  redoFilePathStrategy: 'custom' | 'auto_same' | 'auto_append'
+
+  // 路径
+  primaryDataFilePath?: string
+  standbyDataFilePath?: string
+  primaryRedoFilePath?: string
+  standbyRedoFilePath?: string
+
+  // 归档
+  standbyArchivePath: string
+  archiveCleanupPolicy: 'none' | 'days' | 'size' | 'files'
+  archiveCleanupParam?: number
+}
+
+// 标准联调样例配置
+export const STANDARD_PRESET: SetupPresetData = {
+  // 主库连接信息
   primaryHost: '192.168.123.10',
-  standbyHost: '192.168.123.10',
-
-  // SSH 配置
+  primaryPort: 22,
   primarySshUser: 'oracle',
+  primarySshAuthType: 'password',
   primarySshPassword: 'oracle',
-  primarySshAuthType: 'password' as const,
-  standbySshUser: 'oracle',
-  standbySshPassword: 'oracle',
-  standbySshAuthType: 'password' as const,
 
-  // 主库 Oracle 配置
-  primarySid: 'orcl',
-  primaryDbUniqueName: 'orcl',
+  // 主库 Oracle 信息
   primaryOracleHome: '/u01/app/oracle/product/11.2.0/db_1',
+  primaryDbUniqueName: 'orcl',
+  primaryOracleBase: '/u01/app/oracle',
+  primarySysPassword: 'oracle',
   primaryListenerPort: 1521,
+  primaryServiceName: 'orcl',
+  primaryStorageType: 'fs',
+  primaryIsCdb: false,
+  primarySid: 'orcl',
 
-  // 备库 Oracle 配置
+  // 备库连接信息
+  standbyHost: '192.168.123.10',
+  standbyPort: 22,
+  standbySshUser: 'oracle',
+  standbySshAuthType: 'password',
+  standbySshPassword: 'oracle',
+
+  // 备库 Oracle 信息
+  standbyOracleHome: '/u01/app/oracle/product/11.2.0/db_1',
   standbySid: 'orcl_std',
   standbyDbUniqueName: 'orcl_std',
-  standbyOracleHome: '/u01/app/oracle/product/11.2.0/db_1',
   standbyListenerPort: 1521,
+  standbyServiceName: 'orcl_std',
+  standbyStorageType: 'fs',
+  standbyIsCdb: false,
 
-  // 全局配置
-  duplicateMode: 'active_duplicate' as const,
+  // 搭建配置
+  duplicateMode: 'active',
   protectionMode: 'MAXIMUM PERFORMANCE',
-  logTransportMode: 'ASYNC' as const,
+  logTransportMode: 'ASYNC',
   enableRealtimeApply: true,
   autoCreateSrl: false,
 
-  // 路径配置
-  dataFilePathStrategy: 'custom' as const,
+  // 路径策略
+  dataFilePathStrategy: 'custom',
+  redoFilePathStrategy: 'custom',
+
+  // 路径
   primaryDataFilePath: '/u01/app/oracle/oradata/ORCL/datafile',
   standbyDataFilePath: '/u01/app/oracle/oradata/ORCLSTD/datafile',
-
-  redoFilePathStrategy: 'custom' as const,
   primaryRedoFilePath: '/u01/app/oracle/oradata/ORCL/onlinelog',
   standbyRedoFilePath: '/u01/app/oracle/oradata/ORCLSTD/onlinelog',
 
-  // 归档配置
-  standbyArchivePath: '/u01/arch',
-  archiveCleanupPolicy: 'none' as const,
-} as const
+  // 归档
+  standbyArchivePath: '/u02/arch',
+  archiveCleanupPolicy: 'none',
+}

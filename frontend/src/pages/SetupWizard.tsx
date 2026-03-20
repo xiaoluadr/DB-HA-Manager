@@ -39,6 +39,7 @@ import {
   EditOutlined,
   InfoCircleOutlined,
   ExclamationCircleOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import api from '@/api/client'
@@ -154,6 +155,23 @@ const PATH_STRATEGY_OPTIONS: { value: PathStrategy; label: string }[] = [
   { value: 'convert', label: '自动转换' },
   { value: 'custom', label: '自定义' },
 ]
+
+const MANUAL_INPUT_HINT = '必填项-需手动输入'
+const AUTO_INPUT_HINT = '自动探测回填，支持手工覆盖'
+const ARCHIVE_PATH_PATTERN = /^\/[A-Za-z0-9/_\.-]+$/
+
+const markManualLabel = (label: string): string => (label.startsWith('*') ? label : `*${label}`)
+
+const normalizeHost = (value?: string | null): string => (value || '').trim()
+
+const hostsAreEqual = (primary?: string | null, standby?: string | null): boolean => {
+  const normalizedPrimary = normalizeHost(primary)
+  const normalizedStandby = normalizeHost(standby)
+  if (!normalizedPrimary || !normalizedStandby) {
+    return false
+  }
+  return normalizedPrimary === normalizedStandby
+}
 
 const ARCHIVE_CLEANUP_OPTIONS: { value: ArchiveCleanupPolicy; label: string }[] = [
   { value: 'none', label: '不自动清理' },
@@ -861,13 +879,17 @@ function SetupWizard() {
   const [reconfirmKeys, setReconfirmKeys] = useState<string[]>([])
   const [submitLoading, setSubmitLoading] = useState(false)
   const [activeStageKeys, setActiveStageKeys] = useState<string[]>([])
-  const [testConnectionLoading, setTestConnectionLoading] = useState(false)
-  const [testConnectionType, setTestConnectionType] = useState<'primary' | 'standby' | null>(null)
   const [fieldOverrides, setFieldOverrides] = useState<Record<string, FieldOverrideInfo>>({})
   const [editingField, setEditingField] = useState<OverrideFieldKey | null>(null)
   const [overrideModalVisible, setOverrideModalVisible] = useState(false)
   const [overrideForm] = Form.useForm<{ value: any }>()
   const [demoModeEnabled, setDemoModeEnabled] = useState(false)
+  const primaryHostValue = Form.useWatch('primaryHost', form)
+  const standbyHostValue = Form.useWatch('standbyHost', form)
+  const isSameHost = useMemo(
+    () => hostsAreEqual(primaryHostValue, standbyHostValue),
+    [primaryHostValue, standbyHostValue],
+  )
 
   const resetFieldOverrideState = () => {
     setFieldOverrides({})
@@ -879,6 +901,25 @@ function SetupWizard() {
   useEffect(() => {
     form.setFieldsValue(DEFAULT_FORM_VALUES as SetupFormData)
   }, [form])
+
+  useEffect(() => {
+    if (!isSameHost) {
+      return
+    }
+    const dataStrategy = form.getFieldValue('dataFilePathStrategy')
+    const redoStrategy = form.getFieldValue('redoFilePathStrategy')
+    const nextValues: Partial<SetupFormData> = {}
+    if (dataStrategy && dataStrategy !== 'custom') {
+      nextValues.dataFilePathStrategy = 'custom'
+    }
+    if (redoStrategy && redoStrategy !== 'custom') {
+      nextValues.redoFilePathStrategy = 'custom'
+    }
+    if (Object.keys(nextValues).length > 0) {
+      form.setFieldsValue(nextValues)
+      message.info('主备 IP 相同时，路径策略已自动切换为“自定义”')
+    }
+  }, [isSameHost, form])
 
   useEffect(() => {
     if (!previewData?.execution_plan?.stages?.length) {
@@ -942,6 +983,28 @@ function SetupWizard() {
       return false
     }
     return true
+  }
+
+  const confirmSameHostRisk = async (values: SetupFormData): Promise<boolean> => {
+    if (!hostsAreEqual(values.primaryHost, values.standbyHost)) {
+      return true
+    }
+    return new Promise((resolve) => {
+      Modal.confirm({
+        title: '主备 IP 相同',
+        content: (
+          <Space direction='vertical' size={8}>
+            <Text>主备同机存在数据风险，请确认您已理解风险。</Text>
+            <Text type='secondary'>主备同机可能导致管理混乱，请确认已做好数据备份和隔离措施。</Text>
+          </Space>
+        ),
+        okText: '确认风险并继续',
+        cancelText: '返回修改',
+        centered: true,
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      })
+    })
   }
 
   const presentPreviewError = (error: unknown) => {
@@ -1145,7 +1208,7 @@ function SetupWizard() {
 
     const isApiResponseShape = (
       payload: PreviewApiResponse,
-    ): payload is APIResponse<PreviewResponse | PreviewErrorBody> =>
+    ): payload is APIResponse<PreviewResponse> | APIResponse<PreviewErrorBody> =>
       typeof payload === 'object' && payload !== null && 'success' in payload
 
     const isFastApiErrorResponse = (
@@ -1162,6 +1225,10 @@ function SetupWizard() {
       setValidationErrors({})
       const values = await form.validateFields()
       if (!guardPreviewRequirements(values)) {
+        return
+      }
+      const riskAccepted = await confirmSameHostRisk(values)
+      if (!riskAccepted) {
         return
       }
       const payload = buildPreviewPayload(values)
@@ -1261,6 +1328,10 @@ function SetupWizard() {
       if (!guardPreviewRequirements(values)) {
         return
       }
+      const riskAccepted = await confirmSameHostRisk(values)
+      if (!riskAccepted) {
+        return
+      }
       resetFieldOverrideState()
       const payload = buildPreviewPayload(values)
       const config = demoModeEnabled ? { params: { demo: true } } : undefined
@@ -1291,54 +1362,14 @@ function SetupWizard() {
     }
   }
 
-  const handleTestConnection = async (type: 'primary' | 'standby') => {
-    if (testConnectionLoading) return
+  const handleLoadPreset = async () => {
     try {
-      setTestConnectionLoading(true)
-      setTestConnectionType(type)
-      const values = await form.validateFields()
-      const payload = type === 'primary'
-        ? {
-            host: values.primaryHost,
-            port: values.primaryPort,
-            username: values.primarySshUser,
-            auth_type: values.primarySshAuthType,
-            key_path: values.primarySshKeyPath,
-            password: values.primarySshPassword,
-          }
-        : {
-            host: values.standbyHost,
-            port: values.standbyPort,
-            username: values.standbySshUser,
-            auth_type: values.standbySshAuthType,
-            key_path: values.standbySshKeyPath,
-            password: values.standbySshPassword,
-          }
-
-      const result = await api.post<
-        APIResponse<{ success: boolean; message: string }>,
-        APIResponse<{ success: boolean; message: string }>
-      >(
-        '/oracle/adg/test-connection',
-        payload,
-      )
-      const isSuccess = result?.success ?? result?.data?.success ?? false
-      const message = result?.message ?? result?.data?.message ?? (isSuccess ? '连接测试成功' : '连接测试失败')
-      Modal[isSuccess ? 'success' : 'error']({
-        title: `${type === 'primary' ? '主库' : '备库'}连接测试`,
-        content: message,
-      })
+      const { STANDARD_PRESET } = await import('../setupPresets.local.ts')
+      form.setFieldsValue(STANDARD_PRESET as Partial<SetupFormData>)
+      message.success('联调样例已加载')
     } catch (error) {
-      if ((error as any)?.errorFields) {
-        return
-      }
-      Modal.error({
-        title: '连接测试失败',
-        content: error instanceof Error ? error.message : '未知错误',
-      })
-    } finally {
-      setTestConnectionLoading(false)
-      setTestConnectionType(null)
+      console.error('加载联调样例失败', error)
+      message.error('加载联调样例失败，请检查预设文件')
     }
   }
 
@@ -1466,8 +1497,14 @@ function SetupWizard() {
             ? value.trim() === primaryValue.trim()
             : Object.is(value, primaryValue)
           if (valuesMatch) {
-            source = 'inherit_primary'
+            if (fieldKey === 'standby_storage_type' || fieldKey === 'standby_is_cdb') {
+              source = 'inherit_primary'
+            }
           }
+        }
+        if (fieldKey === 'standby_service_name' && !hasDiscoveryValue && !hasFormValue) {
+          value = form.getFieldValue('standbyDbUniqueName')
+          source = 'planned'
         }
       }
     }
@@ -2444,29 +2481,29 @@ function SetupWizard() {
             showIcon
             message={(
               <Space style={{ width: '100%', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>演示模式 / 使用演示数据预览</span>
-                  <Switch
-                    checked={demoModeEnabled}
-                    onChange={(checked) => {
-                      if (checked) {
-                        Modal.confirm({
-                          title: '确认启用演示模式？',
-                          content: '启用演示模式后，系统将返回模拟数据，不会连接真实主机。这仅用于演示和测试目的。',
-                          okText: '确认启用',
-                          cancelText: '取消',
-                          onOk: () => setDemoModeEnabled(true),
-                        })
-                      } else {
-                        setDemoModeEnabled(false)
-                      }
-                    }}
-                    size="small"
-                  />
-                </Space>
-              )}
-              description={demoModeEnabled
-                ? '警告：当前将直接返回 mock 数据，不会连接真实主机。这仅用于演示和测试目的。'
-                : '关闭演示模式后，预览会尝试连接真实主机执行探测。适合在没有真实环境时预览功能。'}
+                <span>演示模式 / 使用演示数据预览</span>
+                <Switch
+                  checked={demoModeEnabled}
+                  onChange={(checked) => {
+                    if (checked) {
+                      Modal.confirm({
+                        title: '确认启用演示模式？',
+                        content: '启用演示模式后，系统将返回模拟数据，不会连接真实主机。这仅用于演示和测试目的。',
+                        okText: '确认启用',
+                        cancelText: '取消',
+                        onOk: () => setDemoModeEnabled(true),
+                      })
+                    } else {
+                      setDemoModeEnabled(false)
+                    }
+                  }}
+                  size="small"
+                />
+              </Space>
+            )}
+            description={demoModeEnabled
+              ? '警告：当前将直接返回 mock 数据，不会连接真实主机。这仅用于演示和测试目的。'
+              : '关闭演示模式后，预览会尝试连接真实主机执行探测。适合在没有真实环境时预览功能。'}
           />
           {previewError && (
             <Alert
@@ -2499,16 +2536,6 @@ function SetupWizard() {
               <Card
                 style={cardStyle}
                 title="主库信息"
-                extra={(
-                  <Button
-                    size="small"
-                    icon={<SafetyCertificateOutlined />}
-                    onClick={() => handleTestConnection('primary')}
-                    loading={testConnectionLoading && testConnectionType === 'primary'}
-                  >
-                    测试连接
-                  </Button>
-                )}
               >
                 <Space direction="vertical" size="large" style={{ width: '100%' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2523,29 +2550,33 @@ function SetupWizard() {
                   </div>
                   <Form.Item
                     name="primaryHost"
-                    label="主机地址"
+                    label={markManualLabel('主库 IP')}
                     rules={[{ required: true, message: '请输入主库主机名或 IP' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="192.168.1.10" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primaryPort"
-                    label="SSH 端口"
+                    label={markManualLabel('主库 SSH 端口')}
                     rules={[{ required: true, message: '请输入端口' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <InputNumber min={1} max={65535} style={{ width: '100%' }} />
                   </Form.Item>
                   <Form.Item
                     name="primarySshUser"
-                    label="SSH 用户"
+                    label={markManualLabel('主库 SSH 用户')}
                     rules={[{ required: true, message: '请输入用户' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="oracle" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primarySshAuthType"
-                    label="认证方式"
+                    label={markManualLabel('认证方式')}
                     rules={[{ required: true, message: '请选择' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Select>
                       <Option value="key">私钥</Option>
@@ -2558,8 +2589,9 @@ function SetupWizard() {
                         <>
                           <Form.Item
                             name="primarySshKeyPath"
-                            label="私钥路径"
+                            label={markManualLabel('私钥路径')}
                             rules={[{ required: true, message: '请输入私钥路径' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/home/oracle/.ssh/id_rsa" allowClear />
                           </Form.Item>
@@ -2570,8 +2602,9 @@ function SetupWizard() {
                       ) : (
                         <Form.Item
                           name="primarySshPassword"
-                          label="SSH 密码"
+                          label={markManualLabel('主库 SSH 密码')}
                           rules={[{ required: true, message: '请输入 SSH 密码' }]}
+                          extra={MANUAL_INPUT_HINT}
                         >
                           <Input.Password placeholder="请输入密码" />
                         </Form.Item>
@@ -2584,56 +2617,57 @@ function SetupWizard() {
                   </div>
                   <Form.Item
                     name="primarySid"
-                    label="Oracle SID"
+                    label={markManualLabel('主库 Oracle SID')}
                     rules={[{ required: true, message: '请输入 SID' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="PRIMDB" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primaryOracleHome"
-                    label="ORACLE_HOME"
+                    label={markManualLabel('主库 ORACLE_HOME')}
                     rules={[{ required: true, message: '请输入 ORACLE_HOME' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="/u01/app/oracle/product/19c/dbhome_1" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primaryDbUniqueName"
                     label="DB_UNIQUE_NAME"
-                    rules={[{ required: true, message: '请输入主库唯一名' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Input placeholder="ADGPROD_PRIM" allowClear />
                   </Form.Item>
-                  <Form.Item name="primaryOracleBase" label="ORACLE_BASE">
+                  <Form.Item name="primaryOracleBase" label="ORACLE_BASE" extra={AUTO_INPUT_HINT}>
                     <Input placeholder="/u01/app/oracle" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primarySysPassword"
-                    label="SYS 密码"
+                    label={markManualLabel('SYS 密码')}
                     rules={[{ required: true, message: '请输入 SYS 密码' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input.Password placeholder="SYS 用户密码" />
                   </Form.Item>
                   <Form.Item
                     name="primaryListenerPort"
-                    label="监听端口"
+                    label={markManualLabel('主库监听端口')}
                     rules={[{ required: true, message: '请输入监听端口' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <InputNumber min={1} max={65535} style={{ width: '100%' }} />
                   </Form.Item>
                   <Form.Item
                     name="primaryServiceName"
                     label="SERVICE_NAME"
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Input placeholder="PRIMDB" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="primaryStorageType"
                     label="存储类型"
-                    rules={[{ required: true, message: '请选择存储类型' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Select>
                       <Option value="fs">文件系统</Option>
@@ -2643,8 +2677,7 @@ function SetupWizard() {
                   <Form.Item
                     name="primaryIsCdb"
                     label="是否 CDB"
-                    rules={[{ required: true, message: '请选择是否为 CDB' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Select>
                       <Option value={true}>是</Option>
@@ -2658,16 +2691,6 @@ function SetupWizard() {
               <Card
                 style={cardStyle}
                 title="备库信息"
-                extra={(
-                  <Button
-                    size="small"
-                    icon={<SafetyCertificateOutlined />}
-                    onClick={() => handleTestConnection('standby')}
-                    loading={testConnectionLoading && testConnectionType === 'standby'}
-                  >
-                    测试连接
-                  </Button>
-                )}
               >
                 <Space direction="vertical" size="large" style={{ width: '100%' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2682,29 +2705,33 @@ function SetupWizard() {
                   </div>
                   <Form.Item
                     name="standbyHost"
-                    label="主机地址"
+                    label={markManualLabel('备库 IP')}
                     rules={[{ required: true, message: '请输入备库主机名或 IP' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="192.168.1.11" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="standbyPort"
-                    label="SSH 端口"
+                    label={markManualLabel('备库 SSH 端口')}
                     rules={[{ required: true, message: '请输入端口' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <InputNumber min={1} max={65535} style={{ width: '100%' }} />
                   </Form.Item>
                   <Form.Item
                     name="standbySshUser"
-                    label="SSH 用户"
+                    label={markManualLabel('备库 SSH 用户')}
                     rules={[{ required: true, message: '请输入用户' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="oracle" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="standbySshAuthType"
-                    label="认证方式"
+                    label={markManualLabel('认证方式')}
                     rules={[{ required: true, message: '请选择' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Select>
                       <Option value="key">私钥</Option>
@@ -2717,8 +2744,9 @@ function SetupWizard() {
                         <>
                           <Form.Item
                             name="standbySshKeyPath"
-                            label="私钥路径"
+                            label={markManualLabel('私钥路径')}
                             rules={[{ required: true, message: '请输入私钥路径' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/home/oracle/.ssh/id_rsa" allowClear />
                           </Form.Item>
@@ -2729,8 +2757,9 @@ function SetupWizard() {
                       ) : (
                         <Form.Item
                           name="standbySshPassword"
-                          label="SSH 密码"
+                          label={markManualLabel('备库 SSH 密码')}
                           rules={[{ required: true, message: '请输入 SSH 密码' }]}
+                          extra={MANUAL_INPUT_HINT}
                         >
                           <Input.Password placeholder="请输入密码" />
                         </Form.Item>
@@ -2743,23 +2772,24 @@ function SetupWizard() {
                   </div>
                   <Form.Item
                     name="standbySid"
-                    label="Oracle SID"
+                    label={markManualLabel('备库 Oracle SID')}
                     rules={[{ required: true, message: '请输入备库 SID' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="STBYDB" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="standbyOracleHome"
-                    label="ORACLE_HOME"
+                    label={markManualLabel('备库 ORACLE_HOME')}
                     rules={[{ required: true, message: '请输入 ORACLE_HOME' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="/u01/app/oracle/product/19c/dbhome_1" allowClear />
                   </Form.Item>
                   {/* Requirement #3: 明确要求用户手工提供备库唯一名，杜绝依赖自动探测造成的错误配置。 */}
                   <Form.Item
                     name="standbyDbUniqueName"
-                    label="备库 DB_UNIQUE_NAME"
+                    label={markManualLabel('备库 DB_UNIQUE_NAME')}
                     rules={[
                       { required: true, message: '请输入备库唯一数据库名' },
                       ({ getFieldValue }) => ({
@@ -2774,32 +2804,32 @@ function SetupWizard() {
                         },
                       }),
                     ]}
-                    extra="请填写备库的目标唯一数据库名，不再依赖自动探测。"
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <Input placeholder="ADGPROD_STBY" allowClear />
                   </Form.Item>
-                  <Form.Item name="standbyOracleBase" label="ORACLE_BASE">
+                  <Form.Item name="standbyOracleBase" label="ORACLE_BASE" extra={AUTO_INPUT_HINT}>
                     <Input placeholder="/u01/app/oracle" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="standbyListenerPort"
-                    label="监听端口"
+                    label={markManualLabel('备库监听端口')}
                     rules={[{ required: true, message: '请输入监听端口' }]}
+                    extra={MANUAL_INPUT_HINT}
                   >
                     <InputNumber min={1} max={65535} style={{ width: '100%' }} />
                   </Form.Item>
                   <Form.Item
                     name="standbyServiceName"
                     label="SERVICE_NAME"
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Input placeholder="STBYDB" allowClear />
                   </Form.Item>
                   <Form.Item
                     name="standbyStorageType"
                     label="存储类型"
-                    rules={[{ required: true, message: '请选择存储类型' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Select>
                       <Option value="fs">文件系统</Option>
@@ -2809,8 +2839,7 @@ function SetupWizard() {
                   <Form.Item
                     name="standbyIsCdb"
                     label="是否 CDB"
-                    rules={[{ required: true, message: '请选择是否为 CDB' }]}
-                    extra="自动探测回填，支持手工覆盖"
+                    extra={AUTO_INPUT_HINT}
                   >
                     <Select>
                       <Option value={true}>是</Option>
@@ -2821,26 +2850,17 @@ function SetupWizard() {
               </Card>
             </Col>
           </Row>
-          <Card style={cardStyle} title="数据库标识与全局配置">
+          <Card style={cardStyle} title="搭建方式以及全局配置">
             <Space direction="vertical" size="large" style={{ width: '100%' }}>
-              <div>
-                <Text style={{ fontWeight: 600, color: 'var(--text)' }}>数据库标识</Text>
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginTop: 12 }}
-                  message="DB_NAME 自动推导"
-                  description="系统会依据主库 DB_UNIQUE_NAME 或 SID 自动推导 DB_NAME，无需重复填写。若需覆盖，请直接编辑实例信息。"
-                />
-              </div>
               <div>
                 <Text style={{ fontWeight: 600, color: 'var(--text)' }}>复制策略</Text>
                 <Row gutter={16} style={{ marginTop: 12 }}>
                   <Col span={8}>
                     <Form.Item
                       name="duplicateMode"
-                      label="搭建方式"
+                      label={markManualLabel('搭建方式')}
                       rules={[{ required: true, message: '请选择搭建方式' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select>
                         <Option value="backup">备份片 Duplicate</Option>
@@ -2851,8 +2871,9 @@ function SetupWizard() {
                   <Col span={8}>
                     <Form.Item
                       name="protectionMode"
-                      label="保护模式"
+                      label={markManualLabel('保护模式')}
                       rules={[{ required: true, message: '请选择保护模式' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select showSearch optionFilterProp="children">
                         {PROTECTION_MODE_OPTIONS.map((mode) => (
@@ -2866,8 +2887,9 @@ function SetupWizard() {
                   <Col span={8}>
                     <Form.Item
                       name="logTransportMode"
-                      label="日志传输模式"
+                      label={markManualLabel('日志传输模式')}
                       rules={[{ required: true, message: '请选择日志传输模式' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select>
                         {LOG_TRANSPORT_MODE_OPTIONS.map((mode) => (
@@ -2896,12 +2918,17 @@ function SetupWizard() {
                   <Col span={12}>
                     <Form.Item
                       name="dataFilePathStrategy"
-                      label="备库数据文件路径策略"
+                      label={markManualLabel('备库数据文件路径策略')}
                       rules={[{ required: true, message: '请选择策略' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select>
                         {PATH_STRATEGY_OPTIONS.map((item) => (
-                          <Option key={item.value} value={item.value}>
+                          <Option
+                            key={item.value}
+                            value={item.value}
+                            disabled={isSameHost && item.value !== 'custom'}
+                          >
                             {item.label}
                           </Option>
                         ))}
@@ -2911,12 +2938,17 @@ function SetupWizard() {
                   <Col span={12}>
                     <Form.Item
                       name="redoFilePathStrategy"
-                      label="备库联机日志路径策略"
+                      label={markManualLabel('备库联机日志路径策略')}
                       rules={[{ required: true, message: '请选择策略' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select>
                         {PATH_STRATEGY_OPTIONS.map((item) => (
-                          <Option key={item.value} value={item.value}>
+                          <Option
+                            key={item.value}
+                            value={item.value}
+                            disabled={isSameHost && item.value !== 'custom'}
+                          >
                             {item.label}
                           </Option>
                         ))}
@@ -2931,8 +2963,9 @@ function SetupWizard() {
                         <Col span={12}>
                           <Form.Item
                             name="primaryDataFilePath"
-                            label="主库数据文件路径前缀"
+                            label={markManualLabel('主库数据文件路径前缀')}
                             rules={[{ required: true, message: '请输入主库路径前缀' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/u01/oradata/PRIM" allowClear />
                           </Form.Item>
@@ -2940,8 +2973,9 @@ function SetupWizard() {
                         <Col span={12}>
                           <Form.Item
                             name="standbyDataFilePath"
-                            label="备库数据文件路径前缀"
+                            label={markManualLabel('备库数据文件路径前缀')}
                             rules={[{ required: true, message: '请输入备库路径前缀' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/u02/oradata/STBY" allowClear />
                           </Form.Item>
@@ -2957,8 +2991,9 @@ function SetupWizard() {
                         <Col span={12}>
                           <Form.Item
                             name="primaryRedoFilePath"
-                            label="主库联机日志路径前缀"
+                            label={markManualLabel('主库联机日志路径前缀')}
                             rules={[{ required: true, message: '请输入主库联机日志路径前缀' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/u01/oradata/PRIM/redo" allowClear />
                           </Form.Item>
@@ -2966,8 +3001,9 @@ function SetupWizard() {
                         <Col span={12}>
                           <Form.Item
                             name="standbyRedoFilePath"
-                            label="备库联机日志路径前缀"
+                            label={markManualLabel('备库联机日志路径前缀')}
                             rules={[{ required: true, message: '请输入备库联机日志路径前缀' }]}
+                            extra={MANUAL_INPUT_HINT}
                           >
                             <Input placeholder="/u02/oradata/STBY/redo" allowClear />
                           </Form.Item>
@@ -2983,8 +3019,22 @@ function SetupWizard() {
                   <Col span={12}>
                     <Form.Item
                       name="standbyArchivePath"
-                      label="备库本地归档目录"
-                      rules={[{ required: true, message: '请输入备库归档目录' }]}
+                      label={markManualLabel('备库本地归档目录')}
+                      rules={[
+                        { required: true, message: '请输入备库归档目录' },
+                        {
+                          validator: (_, value) => {
+                            if (!value) {
+                              return Promise.resolve()
+                            }
+                            if (ARCHIVE_PATH_PATTERN.test(value.trim())) {
+                              return Promise.resolve()
+                            }
+                            return Promise.reject(new Error('路径需以 / 开头，且仅包含字母、数字、/、_、-、.'))
+                          },
+                        },
+                      ]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Input placeholder="/u02/arch" allowClear />
                     </Form.Item>
@@ -2992,8 +3042,9 @@ function SetupWizard() {
                   <Col span={12}>
                     <Form.Item
                       name="archiveCleanupPolicy"
-                      label="归档清理策略"
+                      label={markManualLabel('归档清理策略')}
                       rules={[{ required: true, message: '请选择策略' }]}
+                      extra={MANUAL_INPUT_HINT}
                     >
                       <Select>
                         {ARCHIVE_CLEANUP_OPTIONS.map((item) => (
@@ -3084,9 +3135,18 @@ function SetupWizard() {
         <Space>
           {currentStep === 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-              <Button type="primary" onClick={handlePreview} loading={previewLoading}>
-                生成预览并进入下一步
-              </Button>
+              <Space size={12} wrap>
+                <Button
+                  icon={<DownloadOutlined />}
+                  onClick={handleLoadPreset}
+                  disabled={previewLoading}
+                >
+                  加载联调样例
+                </Button>
+                <Button type="primary" onClick={handlePreview} loading={previewLoading}>
+                  生成预览并进入下一步
+                </Button>
+              </Space>
               <Text type="secondary" style={{ fontSize: 12, textAlign: 'right' }}>
                 💡 填写必要信息后点击此按钮，将自动探测主备环境并跳转至“结果确认”。
               </Text>
