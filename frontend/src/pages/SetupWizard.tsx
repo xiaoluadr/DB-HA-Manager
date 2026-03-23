@@ -35,10 +35,8 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   DeploymentUnitOutlined,
-  ProfileOutlined,
   EditOutlined,
   InfoCircleOutlined,
-  ExclamationCircleOutlined,
   DownloadOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
@@ -52,7 +50,7 @@ import type {
   FieldOverrideInfo,
   PrecheckResultStatus,
   RiskLevel,
-  DiscoveryStatus,
+  ConnectivityStatus,
   DiscoveryInfo,
 } from '@/api/types'
 import { formatDateTime } from '@/utils'
@@ -363,7 +361,7 @@ type FieldValueSource =
   | 'inherit_primary'
   | 'planned'
 
-type StatusTagType = DiscoveryStatus | 'warning'
+type StatusTagType = ConnectivityStatus | 'warning'
 
 interface FieldDisplayMeta {
   value: any
@@ -410,7 +408,7 @@ const DISCOVERY_STATUS_META: Record<StatusTagType, { label: string; color: strin
   missing: { label: '缺失', color: 'var(--text2)' },
   partial: { label: '部分', color: 'var(--primary)' },
   skipped: { label: '跳过', color: 'var(--border)' },
-  unknown: { label: '未知', color: 'var(--border)' },
+  unknown: { label: '未探测到', color: 'var(--border)' },
   warning: { label: '告警', color: 'var(--yellow)' },
 }
 
@@ -504,7 +502,21 @@ const FIELD_OVERRIDE_CONFIG = {
 
 type OverrideFieldKey = keyof typeof FIELD_OVERRIDE_CONFIG
 
-const FEATURE_FLAG_KEYS = ['data_file_path_strategy', 'redo_file_path_strategy', 'archive_cleanup_policy'] as const
+const PRIMARY_OVERRIDE_FIELD_ORDER: OverrideFieldKey[] = [
+  'primary_oracle_home',
+  'primary_service_name',
+  'primary_db_unique_name',
+  'primary_storage_type',
+  'primary_is_cdb',
+]
+
+const STANDBY_OVERRIDE_FIELD_ORDER: OverrideFieldKey[] = [
+  'standby_oracle_home',
+  'standby_service_name',
+  'standby_db_unique_name',
+  'standby_storage_type',
+  'standby_is_cdb',
+]
 
 const REQUIRED_DISCOVERY_FIELDS = Object.values(FIELD_OVERRIDE_CONFIG).map((config) => ({
   formField: config.formField,
@@ -513,8 +525,8 @@ const REQUIRED_DISCOVERY_FIELDS = Object.values(FIELD_OVERRIDE_CONFIG).map((conf
 }))
 // NOTE:
 // 1) renderDiscoveryStep/handlePreview/handleRefetchPreview/handleNext were updated to drive the confirmation UX.
-// 2) Added helpers (renderHostDiscoveryCard, renderOracleDiscoveryCard, renderNetworkStorageCard, renderFieldOverrideModal,
-//    renderFieldValueRow, getFieldDisplayMeta, updateDiscoveredInfoValue) to keep discovery cards composable.
+// 2) Added helpers (renderHostDiscoveryCard, renderOracleDiscoveryCard, renderStrategyEnvironmentCard, renderPrecheckInsightsCard,
+//    renderFieldOverrideModal, renderFieldValueRow, getFieldDisplayMeta, updateDiscoveredInfoValue) to keep discovery cards composable.
 // 3) handleFieldOverride writes overrides back to both the Ant Design form (for later steps) and previewData for immediate feedback.
 // 4) Backend could enrich DiscoveryInfo with explicit SSH/network statuses + directory permission outputs to eliminate placeholders.
 
@@ -532,7 +544,7 @@ const formatDuration = (seconds?: number | null): string => {
 
 const formatValue = (value: any): string => {
   if (value === null || value === undefined || value === '') {
-    return '-'
+    return '未探测到'
   }
   if (typeof value === 'boolean') {
     return value ? '是' : '否'
@@ -547,22 +559,41 @@ const formatValue = (value: any): string => {
   return String(value)
 }
 
-const isNil = (value: any): boolean => value === null || value === undefined || value === ''
-
-const STORAGE_DIR_LABELS: Record<string, string> = {
-  not_exists: '目录不存在',
-  not_writable: '目录不可写',
-  ok: '可写',
-  ok_exists_files: '存在且有文件',
-}
-
-const formatWritable = (value: any, status?: string): string | undefined => {
-  if (status && STORAGE_DIR_LABELS[status]) {
-    return STORAGE_DIR_LABELS[status]
+const formatBoolean = (value: any, trueLabel = '是', falseLabel = '否'): string => {
+  if (value === null || value === undefined) {
+    return '未探测到'
   }
-  if (isNil(value)) return undefined
-  return value ? '可写' : '不可写'
+  return value ? trueLabel : falseLabel
 }
+
+const formatDiskUsage = (usage?: { raw?: string; percent?: number; mount_point?: string }): string => {
+  if (!usage) {
+    return '未探测到'
+  }
+  const pieces: string[] = []
+  if (usage.raw) {
+    pieces.push(usage.raw)
+  }
+  if (typeof usage.percent === 'number') {
+    pieces.push(`${usage.percent}%`)
+  }
+  if (usage.mount_point) {
+    pieces.push(`挂载 ${usage.mount_point}`)
+  }
+  return pieces.length ? pieces.join(' / ') : '未探测到'
+}
+
+const PATH_STRATEGY_LABEL_MAP = PATH_STRATEGY_OPTIONS.reduce<Record<PathStrategy, string>>((acc, item) => {
+  acc[item.value] = item.label
+  return acc
+}, {} as Record<PathStrategy, string>)
+
+const DUPLICATE_MODE_LABELS: Record<DuplicateMode, string> = {
+  active: 'Active Duplicate',
+  backup: 'Backup 片 Duplicate',
+}
+
+const isNil = (value: any): boolean => value === null || value === undefined || value === ''
 
 const getDiscoveryValue = (info: DiscoveryInfo | undefined, path: string[]): any => {
   if (!info || !path.length) return undefined
@@ -1452,6 +1483,10 @@ function SetupWizard() {
     const discoveryValue = getDiscoveryValue(previewData?.discovered_info, config.path)
     const formValue = form.getFieldValue(config.formField)
     const previewReady = Boolean(previewData)
+    const pathLeaf = config.path[config.path.length - 1]
+    const isServiceField = pathLeaf === 'service_name'
+    const isPrimaryServiceField = isServiceField && config.role === 'primary'
+    const isStandbyServiceField = isServiceField && config.role === 'standby'
 
     if (overrideInfo) {
       return {
@@ -1463,6 +1498,32 @@ function SetupWizard() {
 
     const hasDiscoveryValue = !isNil(discoveryValue)
     const hasFormValue = !isNil(formValue)
+
+    if (isServiceField) {
+      if (hasFormValue) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: discoveryValue,
+        }
+      }
+      if (isPrimaryServiceField && hasDiscoveryValue) {
+        return {
+          value: discoveryValue,
+          source: 'auto_success',
+          originalValue: discoveryValue,
+        }
+      }
+      const planned = isStandbyServiceField
+        ? form.getFieldValue('standbyDbUniqueName') || discoveryValue
+        : discoveryValue
+      return {
+        value: planned,
+        source: previewReady ? 'planned' : 'planned',
+        originalValue: discoveryValue,
+      }
+    }
+
     let value: any = null
     let source: FieldValueSource = 'planned'
 
@@ -1502,11 +1563,15 @@ function SetupWizard() {
             }
           }
         }
-        if (fieldKey === 'standby_service_name' && !hasDiscoveryValue && !hasFormValue) {
+        if (isStandbyServiceField && !hasDiscoveryValue && !hasFormValue) {
           value = form.getFieldValue('standbyDbUniqueName')
           source = 'planned'
         }
       }
+    }
+
+    if (isStandbyServiceField && source === 'auto_success') {
+      source = 'planned'
     }
 
     return {
@@ -1516,19 +1581,10 @@ function SetupWizard() {
     }
   }
 
-  const normalizeDiscoveryStatus = (raw?: any): StatusTagType => {
+  const normalizeConnectivityStatus = (raw?: any): StatusTagType => {
     if (!raw) return 'unknown'
     const keys = Object.keys(DISCOVERY_STATUS_META) as StatusTagType[]
     return keys.includes(raw as StatusTagType) ? raw as StatusTagType : 'unknown'
-  }
-
-  const mapConnectivityToStatus = (value?: string): DiscoveryStatus => {
-    if (!value) return 'unknown'
-    const normalized = value.toLowerCase()
-    if (['ok', 'success', 'reachable', 'pass'].includes(normalized)) return 'success'
-    if (['fail', 'failed', 'error'].includes(normalized)) return 'failed'
-    if (normalized.includes('timeout')) return 'timeout'
-    return 'partial'
   }
 
   const mapPathStatusToStatus = (pathStatus?: string): StatusTagType | undefined => {
@@ -1613,8 +1669,13 @@ function SetupWizard() {
     const config = FIELD_OVERRIDE_CONFIG[fieldKey]
     const meta = getFieldDisplayMeta(fieldKey)
     const overrideInfo = fieldOverrides[fieldKey]
+    const shouldShowOriginal = !isNil(meta.originalValue) && (!overrideInfo || meta.source === 'user_input')
     const extra = overrideInfo ? (
       <Tooltip title={`自动探测值: ${formatValue(overrideInfo.originalValue)}`}>
+        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
+      </Tooltip>
+    ) : shouldShowOriginal && meta.source === 'user_input' ? (
+      <Tooltip title={`自动探测值: ${formatValue(meta.originalValue)}`}>
         <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
       </Tooltip>
     ) : null
@@ -1739,9 +1800,18 @@ function SetupWizard() {
   const renderHostDiscoveryCard = (role: 'primary' | 'standby') => {
     const info = previewData?.discovered_info
     const hostInfo = role === 'primary' ? info?.primary_host : info?.standby_host
-    const status = normalizeDiscoveryStatus(hostInfo?.status)
+    const status = normalizeConnectivityStatus(hostInfo?.status)
     const sshUser = role === 'primary' ? form.getFieldValue('primarySshUser') : form.getFieldValue('standbySshUser')
+    const sshPort = role === 'primary' ? form.getFieldValue('primaryPort') : form.getFieldValue('standbyPort')
+    const hostInput = role === 'primary' ? form.getFieldValue('primaryHost') : form.getFieldValue('standbyHost')
     const hostLabel = role === 'primary' ? '主库主机' : '备库主机'
+    const detectedIps: string[] = hostInfo?.detected_ips || []
+    const ipTooltip = detectedIps.length ? (
+      <Tooltip title={`探测到: ${detectedIps.join(', ')}`}>
+        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
+      </Tooltip>
+    ) : null
+    const osDisplay = hostInfo?.os_pretty_name || hostInfo?.os_name || hostInfo?.os_type || hostInfo?.os_version
     return (
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1752,22 +1822,29 @@ function SetupWizard() {
           {renderStatusTag(status)}
         </div>
         {renderFieldValueRow({
+          rowKey: `${role}-input-host`,
+          label: 'IP / 主机（用户输入）',
+          value: hostInput,
+          source: 'user_input',
+          extra: ipTooltip,
+        })}
+        {renderFieldValueRow({
           rowKey: `${role}-hostname`,
           label: '主机名',
           value: hostInfo?.hostname,
           source: hostInfo?.hostname ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
-          rowKey: `${role}-ip`,
-          label: 'IP 地址',
-          value: hostInfo?.ip_address,
-          source: hostInfo?.ip_address ? 'auto_success' : 'auto_failed',
-        })}
-        {renderFieldValueRow({
           rowKey: `${role}-os`,
           label: '操作系统',
-          value: hostInfo?.os_version || hostInfo?.os_type,
-          source: (hostInfo?.os_version || hostInfo?.os_type) ? 'auto_success' : 'auto_failed',
+          value: osDisplay,
+          source: osDisplay ? 'auto_success' : 'auto_failed',
+        })}
+        {renderFieldValueRow({
+          rowKey: `${role}-kernel`,
+          label: '内核版本',
+          value: hostInfo?.kernel,
+          source: hostInfo?.kernel ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
           rowKey: `${role}-ssh`,
@@ -1775,7 +1852,71 @@ function SetupWizard() {
           value: sshUser,
           source: 'user_input',
         })}
+        {renderFieldValueRow({
+          rowKey: `${role}-ssh-port`,
+          label: 'SSH 端口',
+          value: sshPort,
+          source: 'user_input',
+        })}
       </Space>
+    )
+  }
+
+  const mapInstanceStatusToTag = (status?: string): StatusTagType => {
+    if (!status) return 'unknown'
+    const normalized = status.toUpperCase()
+    if (normalized.includes('OPEN') || normalized.includes('READ WRITE')) {
+      return 'success'
+    }
+    if (normalized.includes('MOUNT') || normalized.includes('START')) {
+      return 'warning'
+    }
+    if (normalized.includes('DOWN') || normalized.includes('CLOSE')) {
+      return 'failed'
+    }
+    return 'partial'
+  }
+
+  const renderListenerValidationRow = (
+    role: 'primary' | 'standby',
+    validation?: Record<string, any>,
+    expectedPort?: number,
+  ) => {
+    if (!validation) {
+      return renderFieldValueRow({
+        rowKey: `${role}-listener-validation`,
+        label: '监听校验结果',
+        value: '未探测到',
+        source: previewData ? 'auto_failed' : 'planned',
+      })
+    }
+    const status = (validation.status as PrecheckResultStatus) || 'warn'
+    const detectedPorts: string = Array.isArray(validation.detected_ports) && validation.detected_ports.length
+      ? validation.detected_ports.join(', ')
+      : '未探测到'
+    return (
+      <div key={`${role}-listener-validation`} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>监听校验结果</Text>
+        <Space size={6} wrap>
+          <Tag style={{ borderColor: RESULT_COLORS[status], color: RESULT_COLORS[status], margin: 0 }}>
+            {status.toUpperCase()}
+          </Tag>
+          <Text type="secondary">
+            期望 {expectedPort ?? '未填写'} / 探测 {detectedPorts}
+          </Text>
+          {typeof validation.sid_matched === 'boolean' && (
+            <Tag
+              style={{
+                margin: 0,
+                borderColor: validation.sid_matched ? 'var(--green)' : 'var(--orange)',
+                color: validation.sid_matched ? 'var(--green)' : 'var(--orange)',
+              }}
+            >
+              {validation.sid_matched ? 'SID 匹配' : 'SID 未匹配'}
+            </Tag>
+          )}
+        </Space>
+      </div>
     )
   }
 
@@ -1788,15 +1929,92 @@ function SetupWizard() {
         </Card>
       )
     }
-    const oracleInfo = role === 'primary' ? info.primary_oracle : info.standby_oracle
-    const oracleStatus = normalizeDiscoveryStatus((oracleInfo as any)?.status)
-    const overrideFields = (Object.keys(FIELD_OVERRIDE_CONFIG) as OverrideFieldKey[]).filter(
-      (field) => FIELD_OVERRIDE_CONFIG[field].role === role,
-    )
-    const overrideCount = overrideFields.filter((field) => fieldOverrides[field]).length
+    const isPrimary = role === 'primary'
+    const oracleInfo = isPrimary ? info.primary_oracle : info.standby_oracle
+    const storage = info.storage || {}
+    const primaryDb = info.primary_db || {}
+    const oracleStatus = normalizeConnectivityStatus((oracleInfo as any)?.status)
+    const overrideOrder = isPrimary ? PRIMARY_OVERRIDE_FIELD_ORDER : STANDBY_OVERRIDE_FIELD_ORDER
+    const overrideCount = overrideOrder.filter((field) => fieldOverrides[field]).length
+    const oracleBaseFormField: keyof SetupFormData = isPrimary ? 'primaryOracleBase' : 'standbyOracleBase'
+    const oracleBaseFormValue = form.getFieldValue(oracleBaseFormField)
+    const oracleBaseValue = !isNil(oracleBaseFormValue) ? oracleBaseFormValue : oracleInfo?.oracle_base
+    const oracleBaseSource: FieldValueSource = !isNil(oracleBaseFormValue)
+      ? 'user_input'
+      : oracleInfo?.oracle_base
+        ? 'auto_success'
+        : 'auto_failed'
+    const oracleBaseExtra = oracleBaseSource === 'user_input' && oracleInfo?.oracle_base && oracleInfo.oracle_base !== oracleBaseFormValue ? (
+      <Tooltip title={`自动探测: ${oracleInfo.oracle_base}`}>
+        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
+      </Tooltip>
+    ) : null
+    const sidFormField: keyof SetupFormData = isPrimary ? 'primarySid' : 'standbySid'
+    const sidValue = form.getFieldValue(sidFormField)
+    const sidDetected = oracleInfo?.oracle_sid
+    const sidExtra = sidDetected && sidDetected !== sidValue ? (
+      <Tooltip title={`自动探测: ${sidDetected}`}>
+        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
+      </Tooltip>
+    ) : null
+    const listenerPortField: keyof SetupFormData = isPrimary ? 'primaryListenerPort' : 'standbyListenerPort'
+    const listenerPortValue = form.getFieldValue(listenerPortField)
+    const listenerSource: FieldValueSource = listenerPortValue ? 'user_input' : 'planned'
+    const listenerLabel = isPrimary ? '监听端口' : '监听端口（计划使用）'
+    const dataMeta = (isPrimary ? storage.primary_data : storage.standby_data) as Record<string, any> | undefined
+    const logMeta = (isPrimary ? storage.primary_log : storage.standby_log) as Record<string, any> | undefined
+    const primaryDataStrategyValue = form.getFieldValue('primaryDataFilePath')
+    const primaryLogStrategyValue = form.getFieldValue('primaryRedoFilePath')
+    const standbyDataStrategyValue = form.getFieldValue('standbyDataFilePath')
+    const standbyLogStrategyValue = form.getFieldValue('standbyRedoFilePath')
+    const primaryDataPrefix = primaryDataStrategyValue || storage.primary_data_detected_prefix || storage.data_files_path
+    const primaryLogPrefix = primaryLogStrategyValue || storage.primary_log_detected_prefix || storage.primary_redo_path
+    const standbyDataPrefix = standbyDataStrategyValue || storage.standby_data_files_path
+    const standbyLogPrefix = standbyLogStrategyValue || storage.standby_redo_path || standbyDataPrefix
+    const dataPrefix = isPrimary ? primaryDataPrefix : standbyDataPrefix
+    const logPrefix = isPrimary ? primaryLogPrefix : standbyLogPrefix
+    const primaryDataSource: FieldValueSource = primaryDataStrategyValue
+      ? 'user_input'
+      : storage.primary_data_detected_prefix
+        ? 'auto_success'
+        : storage.data_files_path
+          ? 'planned'
+          : previewData
+            ? 'auto_failed'
+            : 'planned'
+    const primaryLogSource: FieldValueSource = primaryLogStrategyValue
+      ? 'user_input'
+      : storage.primary_log_detected_prefix
+        ? 'auto_success'
+        : storage.primary_redo_path
+          ? 'planned'
+          : previewData
+            ? 'auto_failed'
+            : 'planned'
+    const standbyDataSource: FieldValueSource = standbyDataStrategyValue
+      ? 'user_input'
+      : standbyDataPrefix
+        ? 'planned'
+        : previewData
+          ? 'auto_failed'
+          : 'planned'
+    const standbyLogSource: FieldValueSource = standbyLogStrategyValue
+      ? 'user_input'
+      : standbyLogPrefix
+        ? 'planned'
+        : previewData
+          ? 'auto_failed'
+          : 'planned'
+    const dataPrefixSource: FieldValueSource = isPrimary ? primaryDataSource : standbyDataSource
+    const logPrefixSource: FieldValueSource = isPrimary ? primaryLogSource : standbyLogSource
+    const dataStatus = mapPathStatusToStatus(dataMeta?.status)
+    const logStatus = mapPathStatusToStatus(logMeta?.status)
+    const archiveMode = (primaryDb as any)?.archive_mode
+    const forceLogging = (primaryDb as any)?.force_logging
+    const instanceStatus = isPrimary ? ((primaryDb as any)?.instance_status || oracleInfo?.instance_status) : null
     return (
       <Card
-        title={`${role === 'primary' ? '主库' : '备库'}探测确认`}
+        title={`${isPrimary ? '主库' : '备库'}探测确认`}
         style={cardStyle}
         headStyle={{ color: 'var(--text)' }}
         extra={overrideCount > 0 ? <Badge color="#fa8c16" text={`${overrideCount} 个字段已覆盖`} /> : null}
@@ -1812,180 +2030,246 @@ function SetupWizard() {
           {renderFieldValueRow({
             rowKey: `${role}-version`,
             label: 'Oracle 版本',
-            value: oracleInfo?.version,
-            source: oracleInfo?.version ? 'auto_success' : 'auto_failed',
+            value: oracleInfo?.version || oracleInfo?.sqlplus_version,
+            source: (oracleInfo?.version || oracleInfo?.sqlplus_version) ? 'auto_success' : 'auto_failed',
           })}
+          {renderOverrideFieldRow(isPrimary ? 'primary_oracle_home' : 'standby_oracle_home')}
           {renderFieldValueRow({
-            rowKey: `${role}-base`,
+            rowKey: `${role}-oracle-base`,
             label: 'ORACLE_BASE',
-            value: oracleInfo?.oracle_base,
-            source: oracleInfo?.oracle_base ? 'auto_success' : 'auto_failed',
+            value: oracleBaseValue,
+            source: oracleBaseSource,
+            extra: oracleBaseExtra,
           })}
           {renderFieldValueRow({
             rowKey: `${role}-sid`,
-            label: 'SID',
-            value: oracleInfo?.oracle_sid,
-            source: oracleInfo?.oracle_sid ? 'auto_success' : 'auto_failed',
+            label: 'SID（用户输入）',
+            value: sidValue,
+            source: 'user_input',
+            extra: sidExtra,
+          })}
+          {isPrimary && (
+            renderFieldValueRow({
+              rowKey: 'primary-instance-status',
+              label: '实例运行状态',
+              value: instanceStatus,
+              source: instanceStatus ? 'auto_success' : 'auto_failed',
+              status: mapInstanceStatusToTag(instanceStatus),
+            })
+          )}
+          {renderOverrideFieldRow(isPrimary ? 'primary_service_name' : 'standby_service_name')}
+          {renderFieldValueRow({
+            rowKey: `${role}-listener-port`,
+            label: listenerLabel,
+            value: listenerPortValue,
+            source: listenerSource,
+          })}
+          {renderListenerValidationRow(role, oracleInfo?.listener_validation, listenerPortValue)}
+          {renderFieldValueRow({
+            rowKey: `${role}-data-prefix`,
+            label: `${isPrimary ? '主库' : '备库'}数据文件前缀`,
+            value: dataPrefix,
+            source: dataPrefixSource,
+            status: dataStatus,
           })}
           {renderFieldValueRow({
-            rowKey: `${role}-listener`,
-            label: '监听端口',
-            value: oracleInfo?.listener_port,
-            source: oracleInfo?.listener_port ? 'auto_success' : 'auto_failed',
+            rowKey: `${role}-log-prefix`,
+            label: `${isPrimary ? '主库' : '备库'}日志文件前缀`,
+            value: logPrefix,
+            source: logPrefixSource,
+            status: logStatus,
           })}
-          {role === 'primary' && renderFieldValueRow({
+          {renderOverrideFieldRow(isPrimary ? 'primary_db_unique_name' : 'standby_db_unique_name')}
+          {renderOverrideFieldRow(isPrimary ? 'primary_storage_type' : 'standby_storage_type')}
+          {renderOverrideFieldRow(isPrimary ? 'primary_is_cdb' : 'standby_is_cdb')}
+          {isPrimary && renderFieldValueRow({
             rowKey: 'primary-archive-mode',
             label: '归档模式',
-            value: (info.primary_db as any)?.archive_mode,
-            source: (info.primary_db as any)?.archive_mode ? 'auto_success' : 'auto_failed',
-            status: oracleStatus,
+            value: archiveMode,
+            source: archiveMode ? 'auto_success' : 'auto_failed',
+            status: archiveMode ? (archiveMode.includes('ARC') ? 'success' : 'failed') : 'unknown',
           })}
-          {role === 'primary' && renderFieldValueRow({
+          {isPrimary && renderFieldValueRow({
             rowKey: 'primary-force-logging',
             label: 'Force Logging',
-            value: (info.primary_db as any)?.force_logging,
-            source: (info.primary_db as any)?.force_logging != null ? 'auto_success' : 'auto_failed',
-            status: oracleStatus,
+            value: typeof forceLogging === 'boolean' ? (forceLogging ? '已开启' : '未开启') : undefined,
+            source: typeof forceLogging === 'boolean' ? 'auto_success' : 'auto_failed',
+            status: typeof forceLogging === 'boolean' ? (forceLogging ? 'success' : 'warning') : 'unknown',
           })}
-          {overrideFields.map((fieldKey) => renderOverrideFieldRow(fieldKey))}
         </Space>
       </Card>
     )
   }
 
-  const renderNetworkStorageCard = () => {
-    const info = previewData?.discovered_info
-    const network = info?.network || {}
-    const storage = info?.storage || {}
-    const storageMeta = storage as Record<string, any>
-    const primaryDataStatus = storageMeta?.primary_data_path_status ?? storageMeta?.primary_data_dir_status
-    const standbyDataStatus = storageMeta?.standby_data_path_status ?? storageMeta?.standby_data_dir_status
-    const primaryLogStatus = storageMeta?.primary_log_path_status ?? storageMeta?.primary_log_dir_status
-    const standbyLogStatus = storageMeta?.standby_log_path_status ?? storageMeta?.standby_log_dir_status
-    const primaryLogPath = storage.primary_redo_path || storage.primary_redo_file_path
-    const standbyLogPath = storage.standby_redo_path || storage.standby_redo_file_path
-    const conflicts = info?.conflicts || []
-    const precheckWarnings = (previewData?.precheck_results || []).filter((item) => item.result !== 'pass')
-    const featureFlagWarnings = precheckWarnings.filter((item) => FEATURE_FLAG_KEYS.includes(item.check_name as any))
+  const resolveBoolColor = (value: any, okColor = 'var(--green)', failColor = 'var(--orange)') => {
+    if (value === true) return okColor
+    if (value === false) return failColor
+    return 'var(--text2)'
+  }
+
+  const renderDirectorySummary = (
+    key: string,
+    label: string,
+    meta: Record<string, any> | undefined,
+    source: FieldValueSource,
+    fallbackPath?: string,
+  ) => {
+    const pathValue = meta?.input_path || fallbackPath
+    const status = mapPathStatusToStatus(meta?.status)
     return (
-      <Card title="环境与网络摘要" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
+      <div key={key} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+        {renderFieldValueRow({
+          rowKey: `${key}-path`,
+          label,
+          value: pathValue,
+          source,
+          status,
+        })}
+        <Space size={6} wrap style={{ marginTop: 4 }}>
+          <Tag style={{ borderColor: resolveBoolColor(meta?.exists, 'var(--green)', 'var(--red)'), color: resolveBoolColor(meta?.exists, 'var(--green)', 'var(--red)'), margin: 0 }}>
+            存在: {formatBoolean(meta?.exists)}
+          </Tag>
+          <Tag style={{ borderColor: resolveBoolColor(meta?.writable, 'var(--green)', 'var(--orange)'), color: resolveBoolColor(meta?.writable, 'var(--green)', 'var(--orange)'), margin: 0 }}>
+            可写: {formatBoolean(meta?.writable, '是', '否')}
+          </Tag>
+          <Tag style={{ borderColor: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), color: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), margin: 0 }}>
+            已有文件: {formatBoolean(meta?.has_files, '有', '无')}
+          </Tag>
+          <Tag style={{ borderColor: 'var(--primary)', color: 'var(--primary)', margin: 0 }}>
+            使用: {formatDiskUsage(meta?.disk_usage)}
+          </Tag>
+        </Space>
+      </div>
+    )
+  }
+
+  const renderStrategyEnvironmentCard = () => {
+    const info = previewData?.discovered_info
+    const storage = info?.storage || {}
+    const conflicts = info?.conflicts || []
+    const strategyValues = form.getFieldsValue([
+      'duplicateMode',
+      'protectionMode',
+      'logTransportMode',
+      'enableRealtimeApply',
+      'autoCreateSrl',
+      'dataFilePathStrategy',
+      'redoFilePathStrategy',
+      'standbyArchivePath',
+      'archiveCleanupPolicy',
+      'archiveCleanupParam',
+    ])
+    const archivePolicy = ARCHIVE_CLEANUP_OPTIONS.find((item) => item.value === strategyValues.archiveCleanupPolicy)?.label || '未配置'
+    const archiveCleanupDisplay = strategyValues.archiveCleanupPolicy && strategyValues.archiveCleanupPolicy !== 'none'
+      ? `${archivePolicy} ${strategyValues.archiveCleanupParam ?? ''}`
+      : archivePolicy
+    const duplicateLabel = DUPLICATE_MODE_LABELS[strategyValues.duplicateMode as DuplicateMode] || strategyValues.duplicateMode
+    const dataDirMeta = storage.primary_data as Record<string, any> | undefined
+    const logDirMeta = storage.primary_log as Record<string, any> | undefined
+    const standbyDataMeta = storage.standby_data as Record<string, any> | undefined
+    const standbyLogMeta = storage.standby_log as Record<string, any> | undefined
+    const standbyDataSource: FieldValueSource = form.getFieldValue('standbyDataFilePath') ? 'user_input' : 'planned'
+    const standbyLogSource: FieldValueSource = form.getFieldValue('standbyRedoFilePath') ? 'user_input' : 'planned'
+    const duplicateSource: FieldValueSource = 'user_input'
+    return (
+      <Card title="搭建方式与环境摘要" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
         <Row gutter={[24, 24]}>
           <Col span={24} md={12}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <Space align="center" size={8}>
-                <ThunderboltOutlined style={{ color: 'var(--yellow)' }} />
-                <Text type="secondary">网络与监听</Text>
+                <DeploymentUnitOutlined style={{ color: 'var(--primary)' }} />
+                <Text type="secondary">搭建方式信息</Text>
               </Space>
               {renderFieldValueRow({
-                rowKey: 'network-primary-listener',
-                label: '主库监听端口',
-                value: network.primary_listener_port,
-                source: 'auto_success',
-                status: network.primary_listener_port ? 'success' : 'unknown',
+                rowKey: 'strategy-duplicate-mode',
+                label: '搭建方式',
+                value: duplicateLabel,
+                source: duplicateSource,
               })}
               {renderFieldValueRow({
-                rowKey: 'network-standby-listener',
-                label: '备库监听端口',
-                value: network.standby_listener_port,
-                source: 'auto_success',
-                status: network.standby_listener_port ? 'success' : 'unknown',
+                rowKey: 'strategy-protection',
+                label: '保护模式',
+                value: strategyValues.protectionMode,
+                source: duplicateSource,
               })}
               {renderFieldValueRow({
-                rowKey: 'network-listener-status',
-                label: '主库监听状态',
-                value: network.primary_listener_status,
-                source: 'auto_success',
-                status: mapConnectivityToStatus(network.primary_listener_status),
+                rowKey: 'strategy-transport',
+                label: '日志同步方式',
+                value: strategyValues.logTransportMode,
+                source: duplicateSource,
               })}
               {renderFieldValueRow({
-                rowKey: 'network-log-transport',
-                label: '日志传输模式',
-                value: network.log_transport_mode,
-                source: 'auto_success',
-                status: network.log_transport_mode ? 'success' : 'unknown',
+                rowKey: 'strategy-realtime',
+                label: '实时应用',
+                value: strategyValues.enableRealtimeApply,
+                source: duplicateSource,
               })}
               {renderFieldValueRow({
-                rowKey: 'network-tns',
-                label: 'TNS 检查',
-                value: network.tns_check || '等待后端返回',
-                source: network.tns_check ? 'auto_success' : 'planned',
-                status: mapConnectivityToStatus(network.tns_check),
-                extra: !network.tns_check ? (
-                  <Tooltip title="后端尚未返回 TNS 检查结果">
-                    <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
-                  </Tooltip>
-                ) : null,
+                rowKey: 'strategy-srl',
+                label: 'Standby Redo Log',
+                value: strategyValues.autoCreateSrl,
+                source: duplicateSource,
+              })}
+              {renderFieldValueRow({
+                rowKey: 'strategy-data-path',
+                label: '数据文件路径策略',
+                value: PATH_STRATEGY_LABEL_MAP[strategyValues.dataFilePathStrategy as PathStrategy] || strategyValues.dataFilePathStrategy,
+                source: duplicateSource,
+              })}
+              {renderFieldValueRow({
+                rowKey: 'strategy-redo-path',
+                label: '联机日志路径策略',
+                value: PATH_STRATEGY_LABEL_MAP[strategyValues.redoFilePathStrategy as PathStrategy] || strategyValues.redoFilePathStrategy,
+                source: duplicateSource,
+              })}
+              {renderFieldValueRow({
+                rowKey: 'strategy-archive-dir',
+                label: '备库归档目录',
+                value: strategyValues.standbyArchivePath,
+                source: duplicateSource,
+              })}
+              {renderFieldValueRow({
+                rowKey: 'strategy-archive-clean',
+                label: '归档清理策略',
+                value: archiveCleanupDisplay,
+                source: duplicateSource,
               })}
             </Space>
           </Col>
           <Col span={24} md={12}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <Space align="center" size={8}>
-                <ProfileOutlined style={{ color: 'var(--text2)' }} />
-                <Text type="secondary">存储与目录</Text>
+                <CloudServerOutlined style={{ color: 'var(--text2)' }} />
+                <Text type="secondary">搭建环境信息</Text>
               </Space>
-              {renderFieldValueRow({
-                rowKey: 'storage-primary-path',
-                label: '主库数据文件路径',
-                value: storage.data_files_path,
-                source: storage.data_files_path ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(primaryDataStatus),
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-primary-writable',
-                label: '主库目录可写',
-                value: undefined,
-                source: storage.data_files_path ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(primaryDataStatus),
-                customValue: formatWritable(undefined, primaryDataStatus),
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-standby-path',
-                label: '备库数据文件路径',
-                value: storage.standby_data_files_path,
-                source: storage.standby_data_files_path ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(standbyDataStatus),
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-standby-writable',
-                label: '备库目录可写',
-                value: undefined,
-                source: storage.standby_data_files_path ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(standbyDataStatus),
-                customValue: formatWritable(undefined, standbyDataStatus),
-              })}
-              {primaryLogPath && renderFieldValueRow({
-                rowKey: 'storage-primary-log-path',
-                label: '主库日志文件路径',
-                value: primaryLogPath,
-                source: primaryLogPath ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(primaryLogStatus),
-              })}
-              {standbyLogPath && renderFieldValueRow({
-                rowKey: 'storage-standby-log-path',
-                label: '备库日志文件路径',
-                value: standbyLogPath,
-                source: standbyLogPath ? 'auto_success' : 'auto_failed',
-                status: mapPathStatusToStatus(standbyLogStatus),
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-primary-usage',
-                label: '主库磁盘占用',
-                value: storage.primary_disk_usage,
-                source: storage.primary_disk_usage ? 'auto_success' : 'auto_failed',
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-standby-usage',
-                label: '备库磁盘占用',
-                value: storage.standby_disk_usage,
-                source: storage.standby_disk_usage ? 'auto_success' : 'auto_failed',
-              })}
-              {renderFieldValueRow({
-                rowKey: 'storage-archive-policy',
-                label: '归档清理策略',
-                value: storage.archive_cleanup_policy || '未配置',
-                source: storage.archive_cleanup_policy ? 'auto_success' : 'user_input',
-              })}
+              {renderDirectorySummary(
+                'primary-data-dir',
+                '主库数据目录',
+                dataDirMeta,
+                dataDirMeta ? 'auto_success' : 'auto_failed',
+                storage.data_files_path,
+              )}
+              {renderDirectorySummary(
+                'primary-log-dir',
+                '主库日志目录',
+                logDirMeta,
+                logDirMeta ? 'auto_success' : 'auto_failed',
+                storage.primary_redo_path,
+              )}
+              {renderDirectorySummary(
+                'standby-data-dir',
+                '备库数据目录',
+                standbyDataMeta,
+                standbyDataSource,
+                storage.standby_data_files_path,
+              )}
+              {renderDirectorySummary(
+                'standby-log-dir',
+                '备库日志目录',
+                standbyLogMeta,
+                standbyLogSource,
+                storage.standby_redo_path,
+              )}
             </Space>
           </Col>
         </Row>
@@ -2006,48 +2290,69 @@ function SetupWizard() {
             }
           />
         )}
-        {precheckWarnings.length > 0 && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginTop: 16 }}
-            message="预检查提示"
-            description={
-              <Space direction="vertical" size={4}>
-                {precheckWarnings.slice(0, 4).map((item) => (
-                  <Space key={item.check_name} size={6} wrap>
-                    <Tag style={{ borderColor: RESULT_COLORS[item.result], color: RESULT_COLORS[item.result], margin: 0 }}>
-                      {item.result.toUpperCase()}
-                    </Tag>
-                    <span style={{ color: 'var(--text)' }}>{item.check_name}</span>
-                    <Text type="secondary">{item.message}</Text>
-                  </Space>
-                ))}
-                {precheckWarnings.length > 4 && (
-                  <Text type="secondary">其余 {precheckWarnings.length - 4} 项请在“预检查”步骤查看</Text>
-                )}
+      </Card>
+    )
+  }
+
+  const renderPrecheckInsightsCard = () => {
+    const results = previewData?.precheck_results || []
+    if (!results.length) {
+      return null
+    }
+    const groups: Record<PrecheckResultStatus, PrecheckResult[]> = {
+      pass: [],
+      warn: [],
+      fail: [],
+    }
+    results.forEach((item) => {
+      groups[item.result].push(item)
+    })
+    const severityOrder: { key: PrecheckResultStatus; title: string }[] = [
+      { key: 'fail', title: '阻断 (Fail)' },
+      { key: 'warn', title: '警告 (Warn)' },
+      { key: 'pass', title: '通过 (Pass)' },
+    ]
+    return (
+      <Card title="预检查提示" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          {severityOrder.map((group) => (
+            <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Space align="center" size={8}>
+                <Tag style={{ borderColor: RESULT_COLORS[group.key], color: RESULT_COLORS[group.key], margin: 0 }}>
+                  {group.title}
+                </Tag>
+                <Text type="secondary">{groups[group.key].length ? `${groups[group.key].length} 项` : '暂无'}</Text>
               </Space>
-            }
-          />
-        )}
-        {featureFlagWarnings.length > 0 && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginTop: 16 }}
-            message="Feature Flag 提醒"
-            description={
-              <Space direction="vertical" size={4}>
-                {featureFlagWarnings.map((item) => (
-                  <Space key={item.check_name} size={6} wrap>
-                    <ExclamationCircleOutlined style={{ color: 'var(--orange)' }} />
-                    <span>{item.message}</span>
-                  </Space>
-                ))}
-              </Space>
-            }
-          />
-        )}
+              {groups[group.key].length === 0 ? (
+                <Text type="secondary">未检测到该类型的结果</Text>
+              ) : (
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {groups[group.key].map((item) => (
+                    <div key={item.check_name} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 8 }}>
+                      <Space size={6} wrap>
+                        <Tag style={{ borderColor: RESULT_COLORS[item.result], color: RESULT_COLORS[item.result], margin: 0 }}>
+                          {item.result.toUpperCase()}
+                        </Tag>
+                        <Text style={{ fontWeight: 600 }}>{item.check_name}</Text>
+                        {item.target && (
+                          <Tag style={{ margin: 0, borderColor: 'var(--text2)', color: 'var(--text2)' }}>
+                            对象: {item.target}
+                          </Tag>
+                        )}
+                      </Space>
+                      <Text style={{ display: 'block', marginTop: 4 }}>{item.message}</Text>
+                      {item.suggestion && (
+                        <Text type="secondary" style={{ display: 'block', marginTop: 2 }}>
+                          建议：{item.suggestion}
+                        </Text>
+                      )}
+                    </div>
+                  ))}
+                </Space>
+              )}
+            </div>
+          ))}
+        </Space>
       </Card>
     )
   }
@@ -2105,7 +2410,7 @@ function SetupWizard() {
               <Title level={4} style={{ color: 'var(--text)', marginBottom: 4 }}>
                 自动探测结果确认
               </Title>
-              <Text type="secondary">核对主备主机、Oracle 环境和网络信息，可对关键字段进行覆盖。</Text>
+              <Text type="secondary">核对主备主机、Oracle 环境与搭建策略，可对关键字段进行覆盖。</Text>
             </div>
             <Button onClick={handleRefetchPreview} icon={<ReloadOutlined />} disabled={previewLoading}>
               重新探测
@@ -2139,8 +2444,9 @@ function SetupWizard() {
             </Col>
           </Row>
           <Row gutter={[16, 16]}>
-            <Col span={24}>{renderNetworkStorageCard()}</Col>
+            <Col span={24}>{renderStrategyEnvironmentCard()}</Col>
           </Row>
+          {renderPrecheckInsightsCard()}
           {previewData?.preview_generated_at && (
             <Alert
               type="info"
