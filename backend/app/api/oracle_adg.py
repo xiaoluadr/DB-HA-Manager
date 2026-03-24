@@ -2,6 +2,7 @@
 
 # 变更说明: backend/app/api/oracle_adg.py 修复预览接口 500，涉及 KeyError 规避、日志增强与错误信息细化。
 
+import ipaddress
 import re
 import shlex
 import socket
@@ -38,6 +39,9 @@ router = APIRouter(prefix="/api/oracle/adg", tags=["Oracle ADG"])
 # 预览 API 会在主备主机之间串行执行 SSH 探测。较短的 SSH 连接超时可以缩短失败场景
 # 的等待时间，让请求在前端或 API 网关 30 秒超时之前返回结构化错误。
 DEFAULT_SSH_CONNECT_TIMEOUT = 10
+DISK_USAGE_WARN_THRESHOLD = 85
+DISK_USAGE_FAIL_THRESHOLD = 95
+MAX_PATH_SAMPLE_ROWS = 8
 
 
 class PreviewError(Exception):
@@ -163,8 +167,7 @@ class OraclePreviewExecutor:
             standby_sid = self._resolve_standby_sid()
             self._ensure_sid_present(standby_sid, role="standby")
             self._validate_oracle_environment(self.standby_ssh, standby_oracle_home, role="standby")
-            self.standby_sql = SqlExecutor(self.standby_ssh, standby_oracle_home, standby_sid)
-            self._verify_sqlplus_access(self.standby_sql, role="standby")
+            # 第 2 步备库通常尚未创建完成，这里只要求 SSH + 安装环境可探测，不强制 standby SQL 可连。
 
             return True
         except PreviewError:
@@ -369,58 +372,124 @@ class OraclePreviewExecutor:
 
     def _discover_primary_host(self, discovery: DiscoveryInfo):
         """探测主库主机信息"""
-        discovery.primary_host = {"host": self.request.primary_host}
+        primary_host_value = self.request.primary_host
+        discovery.primary_host = {
+            "host": primary_host_value,
+            "input_host": primary_host_value,
+            "ssh_user": self.request.primary_ssh_user,
+            "ssh_port": self.request.primary_ssh_port,
+        }
+        if self._looks_like_ip(primary_host_value):
+            discovery.primary_host["input_ip"] = primary_host_value
 
         if self.primary_sql:
             os_sql = "SELECT value FROM v$parameter WHERE name = 'os_name'"
             result = self.primary_sql.execute_sql(os_sql)
             if result.success:
-                discovery.primary_host["os_type"] = result.stdout.strip()
+                discovery.primary_host["oracle_os_name"] = result.stdout.strip()
 
         if self.primary_ssh:
             hostname_result = self.primary_ssh.execute("hostname")
             if hostname_result.success:
                 discovery.primary_host["hostname"] = hostname_result.stdout.strip()
-
-            ip_result = self.primary_ssh.execute("hostname -I")
-            if ip_result.success:
-                discovery.primary_host["ip_address"] = ip_result.stdout.strip()
+            detected_ips = self._detect_host_ips(self.primary_ssh)
+            if detected_ips:
+                discovery.primary_host["detected_ips"] = detected_ips
+                discovery.primary_host["ip_address"] = detected_ips[0]
+            os_meta = self._read_os_release(self.primary_ssh)
+            if os_meta:
+                discovery.primary_host.update(os_meta)
+                os_type = os_meta.get("os_pretty_name") or os_meta.get("os_name")
+                if os_type:
+                    discovery.primary_host["os_type"] = os_type
+            kernel = self._fetch_kernel_version(self.primary_ssh)
+            if kernel:
+                discovery.primary_host["kernel"] = kernel
+                discovery.primary_host["kernel_version"] = kernel
 
     def _discover_standby_host(self, discovery: DiscoveryInfo):
         """探测备库主机信息"""
-        discovery.standby_host = {"host": self.request.standby_host}
+        standby_host_value = self.request.standby_host
+        discovery.standby_host = {
+            "host": standby_host_value,
+            "input_host": standby_host_value,
+            "ssh_user": self.request.standby_ssh_user,
+            "ssh_port": self.request.standby_ssh_port,
+        }
+        if self._looks_like_ip(standby_host_value):
+            discovery.standby_host["input_ip"] = standby_host_value
 
         if self.standby_ssh:
             hostname_result = self.standby_ssh.execute("hostname")
             if hostname_result.success:
                 discovery.standby_host["hostname"] = hostname_result.stdout.strip()
+            detected_ips = self._detect_host_ips(self.standby_ssh)
+            if detected_ips:
+                discovery.standby_host["detected_ips"] = detected_ips
+            os_meta = self._read_os_release(self.standby_ssh)
+            if os_meta:
+                discovery.standby_host.update(os_meta)
+                os_type = os_meta.get("os_pretty_name") or os_meta.get("os_name")
+                if os_type:
+                    discovery.standby_host["os_type"] = os_type
+            kernel = self._fetch_kernel_version(self.standby_ssh)
+            if kernel:
+                discovery.standby_host["kernel"] = kernel
+                discovery.standby_host["kernel_version"] = kernel
 
     def _discover_oracle_env(self, discovery: DiscoveryInfo):
         """探测 Oracle 环境"""
-        version_sql = "SELECT version FROM v$instance"
-
-        if self.primary_sql:
-            result = self.primary_sql.execute_sql(version_sql)
-            if result.success:
-                discovery.primary_oracle.version = result.stdout.strip()
-
-        if self.standby_sql:
-            result = self.standby_sql.execute_sql(version_sql)
-            if result.success:
-                discovery.standby_oracle.version = result.stdout.strip()
-
-        discovery.primary_oracle.oracle_home = self._resolve_primary_oracle_home()
+        primary_home = self._resolve_primary_oracle_home()
+        standby_home = self._resolve_standby_oracle_home()
+        discovery.primary_oracle.oracle_home = primary_home
         discovery.primary_oracle.oracle_sid = self._resolve_primary_sid()
-        discovery.primary_oracle.oracle_base = self.request.primary_oracle_base
-        discovery.primary_oracle.storage_type = self._resolve_primary_storage_type()
+        discovery.standby_oracle.oracle_home = standby_home
+        discovery.standby_oracle.oracle_sid = self._resolve_standby_sid()
+
+        primary_oracle_base = self.request.primary_oracle_base
+        if self.primary_sql:
+            discovery.primary_oracle.version = self._detect_primary_oracle_version()
+            instance_status = self.primary_sql.query_single_value("SELECT status FROM v$instance")
+            if instance_status:
+                discovery.primary_oracle.instance_status = instance_status.strip()
+
+        if not primary_oracle_base:
+            base_from_shell = self._read_shell_variable(self.primary_ssh, "ORACLE_BASE")
+            if base_from_shell:
+                primary_oracle_base = base_from_shell
+        if primary_oracle_base:
+            discovery.primary_oracle.oracle_base = primary_oracle_base
+
+        discovery.primary_oracle.sqlplus_version = self._fetch_sqlplus_version(self.primary_ssh, primary_home)
+        if not discovery.primary_oracle.version and discovery.primary_oracle.sqlplus_version:
+            discovery.primary_oracle.version = self._extract_release_version(discovery.primary_oracle.sqlplus_version) or discovery.primary_oracle.sqlplus_version
         discovery.primary_oracle.listener_port = self._resolve_primary_listener_port()
         discovery.primary_oracle.is_cdb = self.request.primary_is_cdb
         discovery.primary_oracle.db_unique_name = self.request.db_unique_name_primary
-        discovery.primary_oracle.service_name = self.request.primary_service_name
+        detected_service = self._detect_primary_service_name()
+        if self.request.primary_service_name:
+            discovery.primary_oracle.service_name = self.request.primary_service_name
+        elif detected_service:
+            discovery.primary_oracle.service_name = detected_service
 
-        discovery.standby_oracle.oracle_home = self._resolve_standby_oracle_home()
-        discovery.standby_oracle.oracle_sid = self._resolve_standby_sid()
-        discovery.standby_oracle.oracle_base = self.request.standby_oracle_base
+        standby_version = self._detect_standby_oracle_version(standby_home)
+        if standby_version:
+            discovery.standby_oracle.version = standby_version
+        elif discovery.primary_oracle.version:
+            discovery.standby_oracle.version = discovery.primary_oracle.version
+
+        standby_oracle_base = self._read_shell_variable(self.standby_ssh, "ORACLE_BASE")
+        if standby_oracle_base:
+            discovery.standby_oracle.oracle_base = standby_oracle_base
+
+        standby_sqlplus_version = self._fetch_sqlplus_version(self.standby_ssh, standby_home)
+        if standby_sqlplus_version:
+            discovery.standby_oracle.sqlplus_version = standby_sqlplus_version
+            if not discovery.standby_oracle.version:
+                discovery.standby_oracle.version = self._extract_release_version(standby_sqlplus_version) or standby_sqlplus_version
+
+        primary_storage_type = self._resolve_primary_storage_type()
+        discovery.primary_oracle.storage_type = primary_storage_type
         # 备库 storage_type：用户输入 > 继承主库 > 主库探测值
         if self.request.standby_storage_type:
             discovery.standby_oracle.storage_type = self.request.standby_storage_type
@@ -435,12 +504,17 @@ class OraclePreviewExecutor:
         elif discovery.primary_oracle.is_cdb is not None:
             discovery.standby_oracle.is_cdb = discovery.primary_oracle.is_cdb
         discovery.standby_oracle.db_unique_name = self.request.db_unique_name_standby
-        discovery.standby_oracle.service_name = self.request.standby_service_name
+        discovery.standby_oracle.service_name = self.request.standby_service_name or self.request.db_unique_name_standby
 
     def _discover_database_status(self, discovery: DiscoveryInfo):
         """探测数据库状态"""
         if not self.primary_sql:
             return
+
+        instance_status = self.primary_sql.query_single_value("SELECT status FROM v$instance")
+        if instance_status:
+            discovery.primary_db["instance_status"] = instance_status.strip()
+            discovery.primary_oracle.instance_status = discovery.primary_oracle.instance_status or instance_status.strip()
 
         role_sql = "SELECT database_role, open_mode FROM v$database"
         role_result = self.primary_sql.execute_sql(role_sql)
@@ -450,23 +524,44 @@ class OraclePreviewExecutor:
                 discovery.primary_db["role"] = lines[0]
                 discovery.primary_db["open_mode"] = lines[1]
 
-        archive_sql = "SELECT log_mode FROM v$database"
-        archive_result = self.primary_sql.execute_sql(archive_sql)
-        if archive_result.success:
-            discovery.primary_db["archive_mode"] = archive_result.stdout.strip()
+        archive_mode = self.primary_sql.query_single_value("SELECT log_mode FROM v$database")
+        if archive_mode:
+            discovery.primary_db["archive_mode"] = archive_mode.strip().upper()
 
-        force_sql = "SELECT force_logging FROM v$database"
-        force_result = self.primary_sql.execute_sql(force_sql)
-        if force_result.success:
-            discovery.primary_db["force_logging"] = force_result.stdout.strip().upper() == "YES"
+        force_logging = self.primary_sql.query_single_value("SELECT force_logging FROM v$database")
+        if force_logging:
+            discovery.primary_db["force_logging"] = force_logging.strip().upper() == "YES"
+
+        cdb_sql = "SELECT cdb FROM v$database"
+        cdb_result = self.primary_sql.execute_sql(cdb_sql)
+        if cdb_result.success:
+            value = (cdb_result.stdout or "").strip().upper()
+            is_cdb = value == "YES"
+            discovery.primary_db["is_cdb"] = is_cdb
+            if discovery.primary_oracle.is_cdb is None:
+                discovery.primary_oracle.is_cdb = is_cdb
 
     def _discover_network(self, discovery: DiscoveryInfo):
         """探测网络状态"""
-        if self.primary_sql:
-            listener_sql = "SELECT status FROM v$listener"
-            listener_result = self.primary_sql.execute_sql(listener_sql)
-            if listener_result.success:
-                discovery.network["primary_listener_status"] = listener_result.stdout.strip()
+        primary_listener = self._probe_listener_status(
+            self.primary_ssh,
+            self._resolve_primary_oracle_home(),
+            self._resolve_primary_listener_port(),
+            self._resolve_primary_sid(),
+        )
+        if primary_listener:
+            discovery.network["primary_listener_status"] = "READY" if primary_listener.get("success") else "NOT READY"
+            discovery.network["primary_listener_check"] = primary_listener
+
+        standby_listener = self._probe_listener_status(
+            self.standby_ssh,
+            self._resolve_standby_oracle_home(),
+            self._resolve_standby_listener_port(),
+            self._resolve_standby_sid(),
+        )
+        if standby_listener:
+            discovery.network["standby_listener_status"] = "READY" if standby_listener.get("success") else "NOT READY"
+            discovery.network["standby_listener_check"] = standby_listener
 
         discovery.network["primary_listener_port"] = self._resolve_primary_listener_port()
         discovery.network["standby_listener_port"] = self._resolve_standby_listener_port()
@@ -480,56 +575,94 @@ class OraclePreviewExecutor:
         primary_redo_path = self.request.primary_redo_file_path or primary_data_path
         standby_redo_path = self.request.standby_redo_file_path or standby_data_path
 
-        discovery.storage["data_files_path"] = primary_data_path
-        discovery.storage["standby_data_files_path"] = standby_data_path
-        discovery.storage["redo_file_path_strategy"] = self.request.redo_file_path_strategy
-        discovery.storage["data_file_path_strategy"] = self.request.data_file_path_strategy
-        discovery.storage["primary_redo_path"] = primary_redo_path
-        discovery.storage["standby_redo_path"] = standby_redo_path
-        discovery.storage["archivelog_path"] = self.request.archivelog_path
+        storage = discovery.storage
+        storage["data_files_path"] = primary_data_path
+        storage["standby_data_files_path"] = standby_data_path
+        storage["redo_file_path_strategy"] = self.request.redo_file_path_strategy
+        storage["data_file_path_strategy"] = self.request.data_file_path_strategy
+        storage["primary_redo_path"] = primary_redo_path
+        storage["standby_redo_path"] = standby_redo_path
+        storage["archivelog_path"] = self.request.archivelog_path
         primary_storage_type = self._resolve_primary_storage_type()
         standby_storage_type = self._resolve_standby_storage_type()
-        discovery.storage["primary_storage_type"] = primary_storage_type
-        discovery.storage["standby_storage_type"] = standby_storage_type
-        discovery.storage["storage_type"] = primary_storage_type
-        discovery.storage["archive_cleanup_policy"] = self.request.archive_cleanup_policy
-        discovery.storage["archive_cleanup_param"] = self.request.archive_cleanup_param
+        standby_storage_inherited = self.request.standby_storage_type is None
+        storage["primary_storage_type"] = primary_storage_type
+        storage["standby_storage_type"] = standby_storage_type
+        storage["storage_type"] = primary_storage_type
+        storage["primary_storage_input_type"] = primary_storage_type
+        storage["standby_storage_input_type"] = standby_storage_type
+        storage["archive_cleanup_policy"] = self.request.archive_cleanup_policy
+        storage["archive_cleanup_param"] = self.request.archive_cleanup_param
 
-        if self.request.archivelog_path:
-            discovery.storage["standby_archive_path"] = self.request.archivelog_path
+        standby_archive_path = self.request.standby_archive_path or self.request.archivelog_path
+        if standby_archive_path:
+            storage["standby_archive_path"] = standby_archive_path
 
-        if self.primary_ssh and primary_data_path:
-            primary_path_meta = self._inspect_path(self.primary_ssh, primary_data_path)
-            discovery.storage["primary_data_dir_status"] = primary_path_meta.get("status")
-            discovery.storage["primary_data_dir_writable"] = primary_path_meta.get("writable")
-            discovery.storage["primary_data_dir_has_files"] = primary_path_meta.get("has_files")
-            df_cmd = f"df -h {primary_data_path} | tail -1"
-            df_result = self.primary_ssh.execute(df_cmd)
-            if df_result.success:
-                discovery.storage["primary_disk_usage"] = df_result.stdout.strip()
+        detected_data_prefix = self._detect_primary_data_prefix()
+        detected_log_prefix = self._detect_primary_log_prefix()
+        if detected_data_prefix:
+            storage["primary_data_detected_prefix"] = detected_data_prefix
+            detected_storage_type = "asm" if detected_data_prefix.strip().startswith("+") else "fs"
+            storage["primary_storage_detected_type"] = detected_storage_type
+            discovery.primary_oracle.storage_type = detected_storage_type
+            if standby_storage_inherited:
+                discovery.standby_oracle.storage_type = detected_storage_type
+                storage["standby_storage_type"] = detected_storage_type
+            storage["primary_storage_type"] = detected_storage_type
+            storage["storage_type"] = detected_storage_type
+        if detected_log_prefix:
+            storage["primary_log_detected_prefix"] = detected_log_prefix
 
-        if self.standby_ssh and standby_data_path:
-            standby_path_meta = self._inspect_path(self.standby_ssh, standby_data_path)
-            discovery.storage["standby_data_dir_status"] = standby_path_meta.get("status")
-            discovery.storage["standby_data_dir_writable"] = standby_path_meta.get("writable")
-            discovery.storage["standby_data_dir_has_files"] = standby_path_meta.get("has_files")
-            df_cmd = f"df -h {standby_data_path} | tail -1"
-            df_result = self.standby_ssh.execute(df_cmd)
-            if df_result.success:
-                discovery.storage["standby_disk_usage"] = df_result.stdout.strip()
+        if not discovery.primary_oracle.storage_type:
+            discovery.primary_oracle.storage_type = primary_storage_type
 
-        # 主备日志目录检查
-        if self.primary_ssh and primary_redo_path:
-            primary_log_meta = self._inspect_path(self.primary_ssh, primary_redo_path)
-            discovery.storage["primary_log_dir_status"] = primary_log_meta.get("status")
-            discovery.storage["primary_log_dir_writable"] = primary_log_meta.get("writable")
-            discovery.storage["primary_log_dir_has_files"] = primary_log_meta.get("has_files")
+        primary_data_meta = self._inspect_path(self.primary_ssh, primary_data_path) if primary_data_path else {}
+        primary_log_meta = self._inspect_path(self.primary_ssh, primary_redo_path) if primary_redo_path else {}
+        standby_data_meta = self._inspect_path(self.standby_ssh, standby_data_path) if standby_data_path else {}
+        standby_log_meta = self._inspect_path(self.standby_ssh, standby_redo_path) if standby_redo_path else {}
 
-        if self.standby_ssh and standby_redo_path:
-            standby_log_meta = self._inspect_path(self.standby_ssh, standby_redo_path)
-            discovery.storage["standby_log_dir_status"] = standby_log_meta.get("status")
-            discovery.storage["standby_log_dir_writable"] = standby_log_meta.get("writable")
-            discovery.storage["standby_log_dir_has_files"] = standby_log_meta.get("has_files")
+        storage["primary_data"] = {
+            "input_path": primary_data_path,
+            "detected_prefix": detected_data_prefix,
+            **(primary_data_meta or {}),
+        }
+        storage["primary_log"] = {
+            "input_path": primary_redo_path,
+            "detected_prefix": detected_log_prefix,
+            **(primary_log_meta or {}),
+        }
+        storage["standby_data"] = {
+            "input_path": standby_data_path,
+            **(standby_data_meta or {}),
+        }
+        storage["standby_log"] = {
+            "input_path": standby_redo_path,
+            **(standby_log_meta or {}),
+        }
+
+        storage["primary_data_dir_status"] = primary_data_meta.get("status")
+        storage["primary_data_dir_writable"] = primary_data_meta.get("writable")
+        storage["primary_data_dir_has_files"] = primary_data_meta.get("has_files")
+        storage["primary_disk_usage"] = (primary_data_meta.get("disk_usage") or {}).get("raw")
+        storage["primary_disk_usage_percent"] = (primary_data_meta.get("disk_usage") or {}).get("percent")
+
+        storage["standby_data_dir_status"] = standby_data_meta.get("status")
+        storage["standby_data_dir_writable"] = standby_data_meta.get("writable")
+        storage["standby_data_dir_has_files"] = standby_data_meta.get("has_files")
+        storage["standby_disk_usage"] = (standby_data_meta.get("disk_usage") or {}).get("raw")
+        storage["standby_disk_usage_percent"] = (standby_data_meta.get("disk_usage") or {}).get("percent")
+
+        storage["primary_log_dir_status"] = primary_log_meta.get("status")
+        storage["primary_log_dir_writable"] = primary_log_meta.get("writable")
+        storage["primary_log_dir_has_files"] = primary_log_meta.get("has_files")
+        storage["primary_log_disk_usage"] = (primary_log_meta.get("disk_usage") or {}).get("raw")
+        storage["primary_log_disk_usage_percent"] = (primary_log_meta.get("disk_usage") or {}).get("percent")
+
+        storage["standby_log_dir_status"] = standby_log_meta.get("status")
+        storage["standby_log_dir_writable"] = standby_log_meta.get("writable")
+        storage["standby_log_dir_has_files"] = standby_log_meta.get("has_files")
+        storage["standby_log_disk_usage"] = (standby_log_meta.get("disk_usage") or {}).get("raw")
+        storage["standby_log_disk_usage_percent"] = (standby_log_meta.get("disk_usage") or {}).get("percent")
 
     def _inspect_path(self, ssh: Optional[RemoteExecutor], path: Optional[str]) -> Dict[str, Optional[Union[bool, str]]]:
         """检查目录状态，返回 exists、writable、has_files 和 status"""
@@ -545,19 +678,24 @@ class OraclePreviewExecutor:
         writable_result = ssh.execute(f"test -w {quoted_path}", timeout=10)
         if not writable_result.success:
             files_result = ssh.execute(f"ls -A {quoted_path}", timeout=10)
-            return {
+            meta = {
                 "exists": True,
                 "writable": False,
                 "has_files": bool((files_result.stdout or "").strip()) if files_result.success else False,
                 "status": "not_writable",
             }
-        files_result = ssh.execute(f"ls -A {quoted_path}", timeout=10)
-        return {
-            "exists": True,
-            "writable": True,
-            "has_files": bool((files_result.stdout or "").strip()) if files_result.success else False,
-            "status": "ok",
-        }
+        else:
+            files_result = ssh.execute(f"ls -A {quoted_path}", timeout=10)
+            meta = {
+                "exists": True,
+                "writable": True,
+                "has_files": bool((files_result.stdout or "").strip()) if files_result.success else False,
+                "status": "ok",
+            }
+        usage = self._collect_disk_usage(ssh, normalized)
+        if usage:
+            meta["disk_usage"] = usage
+        return meta
 
     def _detect_conflicts(self, discovery: DiscoveryInfo):
         """检测冲突"""
@@ -580,33 +718,49 @@ class OraclePreviewExecutor:
         append(self._check_instance_process('standby', standby_sid))
         append(self._check_oracle_home_mapping('primary', primary_sid, primary_home))
         append(self._check_oracle_home_mapping('standby', standby_sid, standby_home))
+        append(self._check_oracle_env_variable('primary', primary_home))
+        append(self._check_oracle_env_variable('standby', standby_home))
 
-        primary_listener_check = self._check_listener_status(
+        primary_listener_status_check = self._check_listener_status(
             role='primary',
             oracle_home=primary_home,
             expected_port=self._resolve_primary_listener_port(),
             discovery=discovery,
         )
-        primary_listener_passed = primary_listener_check is not None and primary_listener_check.result == 'pass'
-        if primary_listener_check:
-            results.append(primary_listener_check)
+        if primary_listener_status_check:
+            results.append(primary_listener_status_check)
 
-        standby_listener_check = self._check_listener_status(
+        primary_listener_port_check = self._check_listener_port_validation(
+            role='primary',
+            oracle_home=primary_home,
+            expected_port=self._resolve_primary_listener_port(),
+            discovery=discovery,
+        )
+        if primary_listener_port_check:
+            results.append(primary_listener_port_check)
+
+        standby_listener_status_check = self._check_listener_status(
             role='standby',
             oracle_home=standby_home,
             expected_port=self._resolve_standby_listener_port(),
             discovery=discovery,
         )
-        if standby_listener_check:
-            results.append(standby_listener_check)
+        if standby_listener_status_check:
+            results.append(standby_listener_status_check)
 
-        if primary_listener_passed:
-            append(self._check_primary_tns_connectivity(primary_home, self._resolve_primary_listener_port(), discovery))
+        standby_listener_port_check = self._check_listener_port_validation(
+            role='standby',
+            oracle_home=standby_home,
+            expected_port=self._resolve_standby_listener_port(),
+            discovery=discovery,
+        )
+        if standby_listener_port_check:
+            results.append(standby_listener_port_check)
 
         append(self._check_primary_custom_path_alignment('data'))
         append(self._check_primary_custom_path_alignment('redo'))
-        append(self._check_standby_directory_ready('data'))
-        append(self._check_standby_directory_ready('redo'))
+        append(self._check_standby_directory_ready(discovery, 'data'))
+        append(self._check_standby_directory_ready(discovery, 'redo'))
 
         results.append(self._check_archive_mode(discovery))
         results.append(self._check_force_logging(discovery))
@@ -619,6 +773,17 @@ class OraclePreviewExecutor:
         results.append(self._check_db_unique_name(discovery))
         results.append(self._check_listener_tns(discovery))
         results.append(self._check_duplicate_prerequisites(discovery))
+        append(self._check_primary_instance_status(discovery))
+        append(self._check_primary_oracle_home_consistency())
+        append(self._check_primary_service_name_consistency(discovery))
+        append(self._check_primary_data_path_alignment())
+        append(self._check_primary_redo_path_alignment())
+        append(self._check_standby_sid_conflict())
+        append(self._check_standby_oracle_home_consistency())
+        append(self._check_standby_data_dir_status(discovery))
+        append(self._check_standby_log_dir_status(discovery))
+        append(self._check_primary_db_unique_name_consistency())
+        append(self._check_standby_db_unique_name_uniqueness())
         results.extend(self._feature_flag_warnings())
         return results
 
@@ -665,6 +830,97 @@ class OraclePreviewExecutor:
             suggestion=suggestion,
             blocking=blocking,
             risk_level=risk,
+            target=f"{role}_instance",
+        )
+
+    def _check_primary_instance_status(self, discovery: DiscoveryInfo) -> Optional[PrecheckResult]:
+        sid = self._resolve_primary_sid()
+        if not self.primary_ssh or not sid:
+            return None
+        normalized_sid = re.sub(r"[^A-Za-z0-9_$-]", "", sid) or sid
+        pattern = f"ora_pmon_{normalized_sid}"
+        command = f"ps -ef | grep -i {shlex.quote(pattern)} | grep -v grep || true"
+        result = self.primary_ssh.execute(command, timeout=10)
+        stdout = (result.stdout or "").strip()
+        pmon_running = bool(stdout)
+
+        instance_status = discovery.primary_oracle.instance_status
+        if not instance_status and self.primary_sql:
+            instance_status = self.primary_sql.query_single_value("SELECT status FROM v$instance")
+        normalized_status = (instance_status or "").strip().upper()
+
+        if not pmon_running:
+            status = 'fail'
+            suggestion = "未检测到 PMON 进程，请先启动主库实例"
+            blocking = True
+            risk = RiskLevel.CRITICAL
+        elif normalized_status == "OPEN":
+            status = 'pass'
+            suggestion = None
+            blocking = False
+            risk = RiskLevel.LOW
+        elif not normalized_status:
+            status = 'warn'
+            suggestion = "未获取到主库实例状态，请检查 SQL 访问"
+            blocking = False
+            risk = RiskLevel.MEDIUM
+        else:
+            status = 'warn'
+            suggestion = "主库实例状态非 OPEN，请检查实例是否可用"
+            blocking = False
+            risk = RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name="primary_instance_status",
+            category="process",
+            result=status,
+            message="主库实例运行状态",
+            evidence={
+                "sid": normalized_sid,
+                "pmon_running": pmon_running,
+                "instance_status": normalized_status or None,
+                "stdout": stdout,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target="primary_instance",
+        )
+
+    def _check_standby_sid_conflict(self) -> Optional[PrecheckResult]:
+        sid = self._resolve_standby_sid()
+        if not self.standby_ssh or not sid:
+            return None
+        normalized_sid = re.sub(r"[^A-Za-z0-9_$-]", "", sid) or sid
+        pattern = f"ora_pmon_{normalized_sid}"
+        command = f"ps -ef | grep -i {shlex.quote(pattern)} | grep -v grep || true"
+        result = self.standby_ssh.execute(command, timeout=10)
+        stdout = (result.stdout or "").strip()
+        is_running = bool(stdout)
+
+        if is_running:
+            status = 'fail'
+            suggestion = "检测到备库同名实例运行，必须先处理冲突后才能继续"
+            risk = RiskLevel.HIGH
+        else:
+            status = 'pass'
+            suggestion = None
+            risk = RiskLevel.LOW
+
+        return PrecheckResult(
+            check_name="standby_sid_conflict",
+            category="process",
+            result=status,
+            message="备库 SID 冲突检查",
+            evidence={
+                "sid": normalized_sid,
+                "pmon_running": is_running,
+                "stdout": stdout,
+            },
+            suggestion=suggestion,
+            blocking=is_running,
+            risk_level=risk,
+            target="standby_instance",
         )
 
     def _check_oracle_home_mapping(
@@ -689,22 +945,22 @@ class OraclePreviewExecutor:
         evidence = {"sid": normalized_sid, "oracle_home": oracle_home, "oratab_line": mapping_line}
 
         if not result.success and not lines:
-            status = 'warn' if role == 'standby' else 'fail'
+            status = 'warn'
             suggestion = "无法读取 /etc/oratab，请确认文件存在并可访问"
-            blocking = role == 'primary'
-            risk = RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH
+            blocking = False
+            risk = RiskLevel.MEDIUM
         elif not mapping_line:
-            status = 'warn' if role == 'standby' else 'fail'
+            status = 'warn'
             suggestion = f"/etc/oratab 中未找到 SID {normalized_sid} 的记录"
-            blocking = role == 'primary'
-            risk = RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH
+            blocking = False
+            risk = RiskLevel.MEDIUM
         else:
             recorded_home = mapping_line.split(":")[1].strip()
             matches = recorded_home.rstrip("/") == oracle_home.rstrip("/")
-            status = 'pass' if matches else ('warn' if role == 'standby' else 'fail')
+            status = 'pass' if matches else 'warn'
             suggestion = None if matches else "请确认 /etc/oratab 中的 ORACLE_HOME 与输入一致"
-            blocking = not matches and role == 'primary'
-            risk = RiskLevel.LOW if matches else (RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH)
+            blocking = False
+            risk = RiskLevel.LOW if matches else RiskLevel.MEDIUM
             evidence["oratab_home"] = recorded_home
 
         return PrecheckResult(
@@ -716,7 +972,205 @@ class OraclePreviewExecutor:
             suggestion=suggestion,
             blocking=blocking,
             risk_level=risk,
+            target=f"{role}_oracle_home",
         )
+
+    def _check_oracle_env_variable(
+        self,
+        role: str,
+        oracle_home: Optional[str],
+    ) -> Optional[PrecheckResult]:
+        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
+        if not executor or not oracle_home:
+            return None
+        env_home = self._read_shell_variable(executor, "ORACLE_HOME")
+        label = "主库" if role == 'primary' else "备库"
+        evidence = {"env_oracle_home": env_home, "expected_oracle_home": oracle_home}
+        check_name = f"{role}_oracle_env_home"
+        message = f"{label} ORACLE_HOME 环境变量"
+
+        if not env_home:
+            status = 'warn'
+            suggestion = "未读取到 ORACLE_HOME 环境变量，请确认 oracle 用户的 profile" if role == 'primary' else "建议在 oracle 用户 profile 中设置 ORACLE_HOME"
+            blocking = False
+            risk = RiskLevel.MEDIUM
+        else:
+            matches = env_home.rstrip('/') == oracle_home.rstrip('/')
+            if matches:
+                status = 'pass'
+                suggestion = None
+                blocking = False
+                risk = RiskLevel.LOW
+            else:
+                status = 'warn'
+                suggestion = "环境变量与输入不符，后续脚本可能执行失败"
+                blocking = False
+                risk = RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name=check_name,
+            category="configuration",
+            result=status,
+            message=message,
+            evidence=evidence,
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target=f"{role}_oracle_env",
+        )
+
+    def _check_primary_oracle_home_consistency(self) -> Optional[PrecheckResult]:
+        oracle_home = self._resolve_primary_oracle_home()
+        if not self.primary_ssh or not oracle_home:
+            return None
+        quoted_home = shlex.quote(oracle_home)
+        exists_result = self.primary_ssh.execute(f"test -d {quoted_home}", timeout=10)
+        exists = exists_result.success
+        env_home = self._read_shell_variable(self.primary_ssh, "ORACLE_HOME")
+        oratab_home = None
+        oratab_line = None
+        if not env_home:
+            sid = self._resolve_primary_sid()
+            if sid:
+                oratab_result = self.primary_ssh.execute("cat /etc/oratab 2>/dev/null", timeout=10)
+                lines = [
+                    line.strip()
+                    for line in (oratab_result.stdout or "").splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+                normalized_sid = sid.strip().upper()
+                oratab_line = next(
+                    (line for line in lines if line.split(":")[0].strip().upper() == normalized_sid),
+                    None,
+                )
+                if oratab_line:
+                    oratab_home = oratab_line.split(":")[1].strip()
+
+        if not exists:
+            status = 'fail'
+            suggestion = "ORACLE_HOME 目录不存在或不可访问，请确认路径"
+            risk = RiskLevel.HIGH
+            blocking = True
+        else:
+            compare_home = env_home if env_home else oratab_home
+            if compare_home:
+                matches = compare_home.rstrip('/') == oracle_home.rstrip('/')
+                status = 'pass' if matches else 'warn'
+                if matches:
+                    suggestion = None
+                    risk = RiskLevel.LOW
+                else:
+                    suggestion = "ORACLE_HOME 与环境变量/ORATAB 不一致，请核对"
+                    risk = RiskLevel.MEDIUM
+            else:
+                status = 'warn'
+                suggestion = "未读取到 ORACLE_HOME 环境变量且 /etc/oratab 无匹配记录，请核对"
+                risk = RiskLevel.MEDIUM
+            blocking = False
+        return PrecheckResult(
+            check_name="primary_oracle_home_consistency",
+            category="configuration",
+            result=status,
+            message="主库 ORACLE_HOME 一致性",
+            evidence={
+                "oracle_home": oracle_home,
+                "exists": exists,
+                "env_oracle_home": env_home,
+                "oratab_home": oratab_home,
+                "oratab_line": oratab_line,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target="primary_oracle_home",
+        )
+
+    def _check_standby_oracle_home_consistency(self) -> Optional[PrecheckResult]:
+        oracle_home = self._resolve_standby_oracle_home()
+        if not self.standby_ssh or not oracle_home:
+            return None
+        quoted_home = shlex.quote(oracle_home)
+        exists_result = self.standby_ssh.execute(f"test -d {quoted_home}", timeout=10)
+        exists = exists_result.success
+        env_home = self._read_shell_variable(self.standby_ssh, "ORACLE_HOME")
+        oratab_home = None
+        oratab_line = None
+        if not env_home:
+            sid = self._resolve_standby_sid()
+            if sid:
+                oratab_result = self.standby_ssh.execute("cat /etc/oratab 2>/dev/null", timeout=10)
+                lines = [
+                    line.strip()
+                    for line in (oratab_result.stdout or "").splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+                normalized_sid = sid.strip().upper()
+                oratab_line = next(
+                    (line for line in lines if line.split(":")[0].strip().upper() == normalized_sid),
+                    None,
+                )
+                if oratab_line:
+                    oratab_home = oratab_line.split(":")[1].strip()
+
+        if not exists:
+            status = 'fail'
+            suggestion = "ORACLE_HOME 目录不存在或不可访问，请确认路径"
+            risk = RiskLevel.HIGH
+            blocking = True
+        else:
+            compare_home = env_home if env_home else oratab_home
+            if compare_home:
+                matches = compare_home.rstrip('/') == oracle_home.rstrip('/')
+                status = 'pass' if matches else 'warn'
+                if matches:
+                    suggestion = None
+                    risk = RiskLevel.LOW
+                else:
+                    suggestion = "ORACLE_HOME 与环境变量/ORATAB 不一致，请核对"
+                    risk = RiskLevel.MEDIUM
+            else:
+                status = 'warn'
+                suggestion = "未读取到 ORACLE_HOME 环境变量且 /etc/oratab 无匹配记录，请核对"
+                risk = RiskLevel.MEDIUM
+            blocking = False
+        return PrecheckResult(
+            check_name="standby_oracle_home_consistency",
+            category="configuration",
+            result=status,
+            message="备库 ORACLE_HOME 一致性",
+            evidence={
+                "oracle_home": oracle_home,
+                "exists": exists,
+                "env_oracle_home": env_home,
+                "oratab_home": oratab_home,
+                "oratab_line": oratab_line,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target="standby_oracle_home",
+        )
+
+    def _get_listener_probe(
+        self,
+        role: str,
+        oracle_home: Optional[str],
+        expected_port: Optional[int],
+        discovery: DiscoveryInfo,
+    ) -> Dict[str, Any]:
+        probe_key = "primary_listener_check" if role == 'primary' else "standby_listener_check"
+        probe = discovery.network.get(probe_key)
+        if isinstance(probe, dict) and probe:
+            return probe
+
+        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
+        sid = self._resolve_primary_sid() if role == 'primary' else self._resolve_standby_sid()
+        probe = self._probe_listener_status(executor, oracle_home, expected_port, sid)
+        if probe:
+            discovery.network[probe_key] = probe
+            status_key = "primary_listener_status" if role == 'primary' else "standby_listener_status"
+            discovery.network[status_key] = "READY" if probe.get("success") else "NOT READY"
+        return probe or {}
 
     def _check_listener_status(
         self,
@@ -725,35 +1179,28 @@ class OraclePreviewExecutor:
         expected_port: Optional[int],
         discovery: DiscoveryInfo,
     ) -> Optional[PrecheckResult]:
-        executor = self.primary_ssh if role == 'primary' else self.standby_ssh
-        if not executor or not oracle_home:
+        probe = self._get_listener_probe(role, oracle_home, expected_port, discovery)
+        if not probe:
             return None
-        env = {
-            "ORACLE_HOME": oracle_home,
-            "PATH": f"{oracle_home}/bin:$PATH",
-            "LD_LIBRARY_PATH": f"{oracle_home}/lib:$LD_LIBRARY_PATH",
-        }
-        result = executor.execute("lsnrctl status", environment=env, timeout=60)
-        stdout = (result.stdout or "").strip()
-        ports = {int(match) for match in re.findall(r"PORT\s*=\s*(\d+)", stdout)}
-        has_expected_port = expected_port in ports if expected_port else bool(ports)
+        stdout = probe["stdout"]
         label = "主库" if role == 'primary' else "备库"
         message = f"{label} Listener 状态检查"
-        status_key = "primary_listener_status" if role == 'primary' else "standby_listener_status"
-        discovery.network[status_key] = "READY" if (result.success and has_expected_port) else "NOT READY"
+        sid = self._resolve_primary_sid() if role == 'primary' else self._resolve_standby_sid()
+        sid_matched = probe["sid_matched"]
+        running = bool(probe.get("success"))
 
-        if not result.success:
-            status = 'fail' if role == 'primary' else 'warn'
-            suggestion = "请确认监听进程已启动，并检查 listener.ora"
-        elif not has_expected_port:
-            status = 'fail' if role == 'primary' else 'warn'
-            suggestion = "监听端口与表单输入不符，请核对 listener.ora"
+        status = 'pass' if running else 'warn'
+        suggestion = None if running else "请确认监听进程已启动，并检查 listener.ora"
+        risk = RiskLevel.LOW if running else RiskLevel.MEDIUM
+        listener_details = {
+            "status": "READY" if running else "NOT READY",
+            "running": running,
+            "sid_matched": sid_matched,
+        }
+        if role == 'primary':
+            discovery.primary_oracle.listener_validation = listener_details
         else:
-            status = 'pass'
-            suggestion = None
-
-        blocking = status == 'fail' and role == 'primary'
-        risk = RiskLevel.LOW if status == 'pass' else (RiskLevel.MEDIUM if status == 'warn' else RiskLevel.HIGH)
+            discovery.standby_oracle.listener_validation = listener_details
 
         return PrecheckResult(
             check_name=f"{role}_listener_status",
@@ -761,13 +1208,61 @@ class OraclePreviewExecutor:
             result=status,
             message=message,
             evidence={
-                "detected_ports": sorted(ports),
-                "expected_port": expected_port,
+                "running": running,
                 "stdout": stdout[:400],
+                "sid_matched": sid_matched,
             },
             suggestion=suggestion,
-            blocking=blocking,
+            blocking=False,
             risk_level=risk,
+            target=f"{role}_listener",
+        )
+
+    def _check_listener_port_validation(
+        self,
+        role: str,
+        oracle_home: Optional[str],
+        expected_port: Optional[int],
+        discovery: DiscoveryInfo,
+    ) -> Optional[PrecheckResult]:
+        probe = self._get_listener_probe(role, oracle_home, expected_port, discovery)
+        if not probe:
+            return None
+        ports = probe["detected_ports"]
+        has_expected_port = probe["has_expected_port"]
+        label = "主库" if role == 'primary' else "备库"
+        message = f"{label} Listener 端口校验"
+        status = 'pass' if has_expected_port else 'warn'
+        suggestion = None if has_expected_port else "监听端口与表单输入不符，请核对 listener.ora"
+        risk = RiskLevel.LOW if has_expected_port else RiskLevel.MEDIUM
+        listener_details = {
+            "status": "READY" if probe.get("success") else "NOT READY",
+            "running": bool(probe.get("success")),
+            "detected_ports": ports,
+            "expected_port": expected_port,
+            "has_expected_port": has_expected_port,
+        }
+        if role == 'primary':
+            discovery.primary_oracle.listener_validation = listener_details
+            discovery.network["primary_listener_port_check"] = {**listener_details, "raw": probe["stdout"][:800]}
+        else:
+            discovery.standby_oracle.listener_validation = listener_details
+            discovery.network["standby_listener_port_check"] = {**listener_details, "raw": probe["stdout"][:800]}
+
+        return PrecheckResult(
+            check_name=f"{role}_listener_port_validation",
+            category="connectivity",
+            result=status,
+            message=message,
+            evidence={
+                "detected_ports": ports,
+                "expected_port": expected_port,
+                "has_expected_port": has_expected_port,
+            },
+            suggestion=suggestion,
+            blocking=False,
+            risk_level=risk,
+            target=f"{role}_listener",
         )
 
     def _check_primary_tns_connectivity(
@@ -813,17 +1308,16 @@ class OraclePreviewExecutor:
             suggestion=suggestion,
             blocking=False,
             risk_level=risk,
+            target="primary_listener",
         )
 
-    def _check_primary_custom_path_alignment(self, path_type: str) -> Optional[PrecheckResult]:
-        strategy = (self.request.data_file_path_strategy if path_type == 'data' else self.request.redo_file_path_strategy) or ''
-        if strategy.lower() != 'custom' or not self.primary_sql:
+    def _build_primary_path_alignment_result(self, path_type: str, path: str) -> Optional[PrecheckResult]:
+        if not self.primary_sql or not path:
             return None
-        path = (self.request.primary_data_file_path if path_type == 'data' else self.request.primary_redo_file_path) or ''
-        if not path:
+        normalized_path = path.strip().rstrip("/")
+        if not normalized_path:
             return None
-        normalized_path = path.rstrip("/").upper()
-        escaped_path = normalized_path.replace("'", "''")
+        escaped_path = normalized_path.upper().replace("'", "''")
         if path_type == 'data':
             sql = (
                 f"SELECT COUNT(*) FROM v$datafile "
@@ -831,18 +1325,48 @@ class OraclePreviewExecutor:
             )
             check_name = "primary_data_path_alignment"
             message = "主库数据文件路径与输入一致性"
-        else:
+        elif path_type == 'redo':
             sql = (
                 f"SELECT COUNT(*) FROM v$logfile "
                 f"WHERE UPPER(member) NOT LIKE '{escaped_path}%'"
             )
             check_name = "primary_redo_path_alignment"
             message = "主库联机日志路径与输入一致性"
-        mismatch = self.primary_sql.query_single_value(sql) or "0"
-        mismatch_count = int(mismatch.strip() or "0")
-        status = 'pass' if mismatch_count == 0 else 'warn'
-        suggestion = None if mismatch_count == 0 else "请确认主库实际路径与自定义路径一致，避免后续 Duplicate 失败"
-        risk = RiskLevel.LOW if mismatch_count == 0 else RiskLevel.MEDIUM
+        else:
+            return None
+
+        mismatch_raw = self.primary_sql.query_single_value(sql)
+        if mismatch_raw is None:
+            return PrecheckResult(
+                check_name=check_name,
+                category="storage",
+                result="warn",
+                message=message,
+                evidence={"expected_prefix": normalized_path, "mismatch_count": None},
+                suggestion="无法获取主库路径信息，请手动核对数据/日志目录",
+                blocking=False,
+                risk_level=RiskLevel.MEDIUM,
+                target=f"primary_{path_type}_path",
+            )
+
+        try:
+            mismatch_count = int(mismatch_raw.strip() or "0")
+        except ValueError:
+            return PrecheckResult(
+                check_name=check_name,
+                category="storage",
+                result="warn",
+                message=message,
+                evidence={"expected_prefix": normalized_path, "mismatch_raw": mismatch_raw},
+                suggestion="主库路径检查结果异常，请手动核对数据/日志目录",
+                blocking=False,
+                risk_level=RiskLevel.MEDIUM,
+                target=f"primary_{path_type}_path",
+            )
+
+        status = 'pass' if mismatch_count == 0 else 'fail'
+        suggestion = None if mismatch_count == 0 else "主库实际路径与输入不一致，请确认并修正"
+        risk = RiskLevel.LOW if mismatch_count == 0 else RiskLevel.HIGH
 
         return PrecheckResult(
             check_name=check_name,
@@ -851,51 +1375,80 @@ class OraclePreviewExecutor:
             message=message,
             evidence={"expected_prefix": normalized_path, "mismatch_count": mismatch_count},
             suggestion=suggestion,
-            blocking=False,
+            blocking=mismatch_count > 0,
             risk_level=risk,
+            target=f"primary_{path_type}_path",
         )
 
-    def _check_standby_directory_ready(self, directory_type: str) -> Optional[PrecheckResult]:
-        strategy = (self.request.data_file_path_strategy if directory_type == 'data' else self.request.redo_file_path_strategy) or ''
-        if strategy.lower() != 'custom' or not self.standby_ssh:
+    def _check_primary_custom_path_alignment(self, path_type: str) -> Optional[PrecheckResult]:
+        strategy = (self.request.data_file_path_strategy if path_type == 'data' else self.request.redo_file_path_strategy) or ''
+        if strategy.lower() != 'custom':
             return None
+        path = (self.request.primary_data_file_path if path_type == 'data' else self.request.primary_redo_file_path) or ''
+        if not path:
+            return None
+        return self._build_primary_path_alignment_result(path_type, path)
+
+    def _check_primary_data_path_alignment(self) -> Optional[PrecheckResult]:
+        strategy = (self.request.data_file_path_strategy or '').strip().lower()
+        if strategy == 'custom':
+            return None
+        path = self.request.primary_data_file_path or self.request.data_files_path
+        if not path:
+            return None
+        return self._build_primary_path_alignment_result('data', path)
+
+    def _check_primary_redo_path_alignment(self) -> Optional[PrecheckResult]:
+        strategy = (self.request.redo_file_path_strategy or '').strip().lower()
+        if strategy == 'custom':
+            return None
+        primary_data_path = self.request.primary_data_file_path or self.request.data_files_path
+        path = self.request.primary_redo_file_path or primary_data_path
+        if not path:
+            return None
+        return self._build_primary_path_alignment_result('redo', path)
+
+    def _check_standby_directory_ready(self, discovery: DiscoveryInfo, directory_type: str) -> Optional[PrecheckResult]:
         path = (self.request.standby_data_file_path if directory_type == 'data' else self.request.standby_redo_file_path) or ''
         normalized = path.strip()
         if not normalized or normalized.startswith("+"):
             return None
-        meta = self._inspect_path(self.standby_ssh, normalized)
-        if not meta:
-            return None
-        status_flag = meta.get("status")
+        meta_key = "standby_data" if directory_type == 'data' else "standby_log"
+        meta = discovery.storage.get(meta_key) or {}
+        if not meta and self.standby_ssh:
+            meta = self._inspect_path(self.standby_ssh, normalized)
+        status_flag = meta.get("status") or "missing"
         has_files = bool(meta.get("has_files"))
+        writable = meta.get("writable")
+        disk_usage = (meta.get("disk_usage") or {}).get("percent")
         label = "数据文件" if directory_type == 'data' else "联机日志"
         check_name = f"standby_{directory_type}_dir_status"
         message = f"备库{label}目录可用性"
 
-        if status_flag == "ok" and not has_files:
-            status = 'pass'
-            suggestion = None
-            risk = RiskLevel.LOW
-            blocking = False
-        elif status_flag == "not_exists":
+        if status_flag == "not_exists":
             status = 'fail'
-            suggestion = "目录不存在，请预先创建并授权 oracle 用户"
+            suggestion = f"目录不存在，请预先创建 {normalized} 并授权 oracle 用户"
             risk = RiskLevel.HIGH
             blocking = True
-        elif status_flag == "not_writable":
+        elif status_flag == "not_writable" or writable is False:
             status = 'warn'
-            suggestion = "目录不可写，请检查权限或磁盘挂载状态"
+            suggestion = "目录无写权限，请检查权限或磁盘挂载状态"
             risk = RiskLevel.MEDIUM
             blocking = False
-        else:
+        elif has_files:
             status = 'warn'
             suggestion = "目录已存在文件，请确认不会覆盖生产数据"
             risk = RiskLevel.MEDIUM
             blocking = False
+        else:
+            status = 'pass'
+            suggestion = None
+            risk = RiskLevel.LOW
+            blocking = False
 
-        if has_files and status == 'pass':
+        if disk_usage is not None and disk_usage >= DISK_USAGE_WARN_THRESHOLD and status == 'pass':
             status = 'warn'
-            suggestion = suggestion or "目录中存在文件，请确保不影响后续 Duplicate"
+            suggestion = f"磁盘使用率 {disk_usage}%，请确认剩余空间"
             risk = RiskLevel.MEDIUM
 
         return PrecheckResult(
@@ -906,12 +1459,101 @@ class OraclePreviewExecutor:
             evidence={
                 "path": normalized,
                 "status": status_flag,
-                "writable": meta.get("writable"),
+                "writable": writable,
                 "has_files": has_files,
+                "disk_usage_percent": disk_usage,
             },
             suggestion=suggestion,
             blocking=blocking,
             risk_level=risk,
+            target=f"standby_{directory_type}_dir",
+        )
+
+    def _build_standby_directory_status_result(
+        self,
+        discovery: DiscoveryInfo,
+        path: Optional[str],
+        directory_type: str,
+        check_name: str,
+        label: str,
+    ) -> Optional[PrecheckResult]:
+        normalized = (path or "").strip()
+        if not normalized or normalized.startswith("+"):
+            return None
+        meta_key = "standby_data" if directory_type == 'data' else "standby_log"
+        meta = discovery.storage.get(meta_key) or {}
+        if not meta and self.standby_ssh:
+            meta = self._inspect_path(self.standby_ssh, normalized)
+
+        status_flag = meta.get("status") or "missing"
+        has_files = bool(meta.get("has_files"))
+        writable = meta.get("writable")
+        disk_usage = (meta.get("disk_usage") or {}).get("percent")
+        message = f"备库{label}目录可用性"
+
+        if status_flag == "not_exists":
+            status = 'fail'
+            suggestion = f"目录不存在，请预先创建 {normalized} 并授权 oracle 用户"
+            risk = RiskLevel.HIGH
+            blocking = True
+        elif status_flag == "not_writable" or writable is False:
+            status = 'warn'
+            suggestion = "目录无写权限，请检查权限或磁盘挂载状态"
+            risk = RiskLevel.MEDIUM
+            blocking = False
+        elif has_files:
+            status = 'warn'
+            suggestion = "目录已存在文件，请确认不会覆盖生产数据"
+            risk = RiskLevel.MEDIUM
+            blocking = False
+        else:
+            status = 'pass'
+            suggestion = None
+            risk = RiskLevel.LOW
+            blocking = False
+
+        if disk_usage is not None and disk_usage >= DISK_USAGE_WARN_THRESHOLD and status == 'pass':
+            status = 'warn'
+            suggestion = f"磁盘使用率 {disk_usage}%，请确认剩余空间"
+            risk = RiskLevel.MEDIUM
+
+        return PrecheckResult(
+            check_name=check_name,
+            category="storage",
+            result=status,
+            message=message,
+            evidence={
+                "path": normalized,
+                "status": status_flag,
+                "writable": writable,
+                "has_files": has_files,
+                "disk_usage_percent": disk_usage,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target=f"standby_{directory_type}_dir",
+        )
+
+    def _check_standby_data_dir_status(self, discovery: DiscoveryInfo) -> Optional[PrecheckResult]:
+        standby_data_path = self.request.standby_data_file_path or self.request.data_files_path
+        return self._build_standby_directory_status_result(
+            discovery=discovery,
+            path=standby_data_path,
+            directory_type="data",
+            check_name="standby_data_dir_status",
+            label="数据文件",
+        )
+
+    def _check_standby_log_dir_status(self, discovery: DiscoveryInfo) -> Optional[PrecheckResult]:
+        standby_data_path = self.request.standby_data_file_path or self.request.data_files_path
+        standby_log_path = self.request.standby_redo_file_path or standby_data_path
+        return self._build_standby_directory_status_result(
+            discovery=discovery,
+            path=standby_log_path,
+            directory_type="log",
+            check_name="standby_log_dir_status",
+            label="联机日志",
         )
 
     def _check_archive_mode(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -927,6 +1569,7 @@ class OraclePreviewExecutor:
             suggestion="启用归档模式: ALTER DATABASE ARCHIVELOG" if not is_archivelog else None,
             blocking=not is_archivelog,
             risk_level=RiskLevel.CRITICAL if not is_archivelog else RiskLevel.LOW,
+            target="primary_database",
         )
 
     def _check_force_logging(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -935,34 +1578,40 @@ class OraclePreviewExecutor:
         return PrecheckResult(
             check_name="force_logging",
             category="configuration",
-            result="pass" if force_logging else "warn",
+            result="pass" if force_logging else "fail",
             message="Force Logging 检查",
             evidence={"force_logging": force_logging},
             suggestion="启用 Force Logging: ALTER DATABASE FORCE LOGGING" if not force_logging else None,
-            blocking=False,
+            blocking=not force_logging,
             risk_level=RiskLevel.MEDIUM if not force_logging else RiskLevel.LOW,
+            target="primary_database",
         )
 
     def _check_version_compatibility(self, discovery: DiscoveryInfo) -> PrecheckResult:
         """检查版本兼容性"""
-        primary_version = discovery.primary_oracle.version or ""
-        standby_version = discovery.standby_oracle.version or primary_version
-        is_compatible = not primary_version or primary_version == standby_version
+        primary_version = (discovery.primary_oracle.version or "").strip()
+        standby_version = (discovery.standby_oracle.version or primary_version).strip()
+        result, suggestion, classification = self._classify_version_compatibility(primary_version, standby_version)
         return PrecheckResult(
             check_name="version_compatibility",
             category="compatibility",
-            result="pass" if is_compatible else "fail",
+            result=result,
             message="主备版本兼容性检查",
-            evidence={"primary_version": primary_version, "standby_version": standby_version},
-            suggestion="确保主备库版本一致" if not is_compatible else None,
-            blocking=not is_compatible,
-            risk_level=RiskLevel.HIGH if not is_compatible else RiskLevel.LOW,
+            evidence={
+                "primary_version": primary_version,
+                "standby_version": standby_version,
+                "classification": classification,
+            },
+            suggestion=suggestion,
+            blocking=result == "fail",
+            risk_level=RiskLevel.HIGH if result == "fail" else RiskLevel.MEDIUM if result == "warn" else RiskLevel.LOW,
+            target="global_configuration",
         )
 
     def _check_network_connectivity(self, discovery: DiscoveryInfo) -> PrecheckResult:
         """检查网络连通性"""
         listener_status = discovery.network.get("primary_listener_status", "")
-        is_reachable = bool(listener_status)
+        is_reachable = listener_status == "READY"
         return PrecheckResult(
             check_name="network_connectivity",
             category="connectivity",
@@ -972,6 +1621,7 @@ class OraclePreviewExecutor:
             suggestion="检查 Listener 配置和防火墙设置" if not is_reachable else None,
             blocking=False,
             risk_level=RiskLevel.MEDIUM if not is_reachable else RiskLevel.LOW,
+            target="network",
         )
 
     def _check_log_transport_mode(self) -> PrecheckResult:
@@ -988,20 +1638,43 @@ class OraclePreviewExecutor:
             suggestion="仅支持 ASYNC 或 SYNC 模式，请调整前端配置" if not is_supported else None,
             blocking=False,
             risk_level=RiskLevel.MEDIUM if not is_supported else RiskLevel.LOW,
+            target="global_configuration",
         )
 
     def _check_standby_space(self, discovery: DiscoveryInfo) -> PrecheckResult:
         """检查备库空间"""
-        has_space = True  # 简化：默认空间充足
+        data_usage = discovery.storage.get("standby_disk_usage_percent")
+        log_usage = discovery.storage.get("standby_log_disk_usage_percent")
+        usage_values = [value for value in (data_usage, log_usage) if value is not None]
+        highest = max(usage_values) if usage_values else None
+        if highest is None:
+            status = 'warn'
+            suggestion = "无法获取备库目录空间，建议手动确认磁盘使用率"
+            blocking = False
+            risk = RiskLevel.MEDIUM
+        elif highest >= DISK_USAGE_WARN_THRESHOLD:
+            status = 'warn'
+            suggestion = f"备库目录使用率 {highest}%，请确认剩余容量"
+            blocking = False
+            risk = RiskLevel.MEDIUM
+        else:
+            status = 'pass'
+            suggestion = None
+            blocking = False
+            risk = RiskLevel.LOW
         return PrecheckResult(
             check_name="standby_space",
             category="storage",
-            result="pass" if has_space else "fail",
+            result=status,
             message="备库可用空间检查",
-            evidence={"estimated_required": "unknown", "available": "unknown"},
-            suggestion="清理备库存储或增加磁盘空间" if not has_space else None,
-            blocking=not has_space,
-            risk_level=RiskLevel.HIGH if not has_space else RiskLevel.LOW,
+            evidence={
+                "standby_data_usage_percent": data_usage,
+                "standby_log_usage_percent": log_usage,
+            },
+            suggestion=suggestion,
+            blocking=blocking,
+            risk_level=risk,
+            target="standby_storage",
         )
 
     def _check_directory_mapping(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -1016,6 +1689,7 @@ class OraclePreviewExecutor:
             suggestion="确保目录存在且有正确权限" if not is_valid else None,
             blocking=False,
             risk_level=RiskLevel.MEDIUM if not is_valid else RiskLevel.LOW,
+            target="storage_mapping",
         )
 
     def _check_storage_type_alignment(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -1039,6 +1713,7 @@ class OraclePreviewExecutor:
             suggestion=suggestion,
             blocking=False,
             risk_level=RiskLevel.MEDIUM if not consistent else RiskLevel.LOW,
+            target="storage_mapping",
         )
 
     def _check_db_unique_name(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -1056,12 +1731,99 @@ class OraclePreviewExecutor:
             suggestion="确保 DB_UNIQUE_NAME 唯一" if has_conflict else None,
             blocking=has_conflict,
             risk_level=RiskLevel.HIGH if has_conflict else RiskLevel.LOW,
+            target="global_configuration",
+        )
+
+    def _check_primary_db_unique_name_consistency(self) -> Optional[PrecheckResult]:
+        expected = (self.request.db_unique_name_primary or "").strip()
+        if not expected or not self.primary_sql:
+            return None
+        actual = self.primary_sql.query_single_value("SELECT db_unique_name FROM v$database")
+        if not actual:
+            return PrecheckResult(
+                check_name="primary_db_unique_name_consistency",
+                category="configuration",
+                result="warn",
+                message="主库 DB_UNIQUE_NAME 一致性",
+                evidence={"expected": expected, "actual": None},
+                suggestion="无法获取主库 DB_UNIQUE_NAME，请手动核对",
+                blocking=False,
+                risk_level=RiskLevel.MEDIUM,
+                target="primary_database",
+            )
+        actual_value = actual.strip()
+        matches = actual_value.upper() == expected.upper()
+        return PrecheckResult(
+            check_name="primary_db_unique_name_consistency",
+            category="configuration",
+            result="pass" if matches else "warn",
+            message="主库 DB_UNIQUE_NAME 一致性",
+            evidence={"expected": expected, "actual": actual_value},
+            suggestion=None if matches else "主库 DB_UNIQUE_NAME 与输入不一致，请核对",
+            blocking=False,
+            risk_level=RiskLevel.LOW if matches else RiskLevel.MEDIUM,
+            target="primary_database",
+        )
+
+    def _check_primary_service_name_consistency(self, discovery: DiscoveryInfo) -> Optional[PrecheckResult]:
+        expected = (self.request.primary_service_name or "").strip()
+        if not expected:
+            return None
+        detected_services = self._detect_primary_service_names()
+        if not detected_services:
+            return PrecheckResult(
+                check_name="primary_service_name_consistency",
+                category="configuration",
+                result="warn",
+                message="主库 SERVICE_NAME 一致性",
+                evidence={"expected": expected, "detected_services": []},
+                suggestion="无法获取主库活跃服务，请手动核对 service_name",
+                blocking=False,
+                risk_level=RiskLevel.MEDIUM,
+                target="primary_database",
+            )
+
+        matches = any(expected.lower() in service.lower() for service in detected_services)
+        return PrecheckResult(
+            check_name="primary_service_name_consistency",
+            category="configuration",
+            result="pass" if matches else "warn",
+            message="主库 SERVICE_NAME 一致性",
+            evidence={
+                "expected": expected,
+                "detected_services": detected_services,
+            },
+            suggestion=None if matches else "主库活跃服务中未找到输入的 service_name，请核对",
+            blocking=False,
+            risk_level=RiskLevel.LOW if matches else RiskLevel.MEDIUM,
+            target="primary_database",
+        )
+
+    def _check_standby_db_unique_name_uniqueness(self) -> Optional[PrecheckResult]:
+        primary_unique = (self.request.db_unique_name_primary or "").strip()
+        standby_unique = (self.request.db_unique_name_standby or "").strip()
+        if not standby_unique or not primary_unique:
+            return None
+        is_conflict = primary_unique.upper() == standby_unique.upper()
+        return PrecheckResult(
+            check_name="standby_db_unique_name_uniqueness",
+            category="configuration",
+            result="fail" if is_conflict else "pass",
+            message="备库 DB_UNIQUE_NAME 唯一性",
+            evidence={
+                "primary_unique_name": primary_unique,
+                "standby_unique_name": standby_unique,
+            },
+            suggestion="备库 DB_UNIQUE_NAME 与主库重复，请修改" if is_conflict else None,
+            blocking=is_conflict,
+            risk_level=RiskLevel.HIGH if is_conflict else RiskLevel.LOW,
+            target="global_configuration",
         )
 
     def _check_listener_tns(self, discovery: DiscoveryInfo) -> PrecheckResult:
         """检查 Listener/TNS"""
         listener_status = discovery.network.get("primary_listener_status", "")
-        is_ok = bool(listener_status)
+        is_ok = listener_status == "READY"
         return PrecheckResult(
             check_name="listener_tns",
             category="connectivity",
@@ -1071,6 +1833,7 @@ class OraclePreviewExecutor:
             suggestion="检查 listener.ora 和 tnsnames.ora 配置" if not is_ok else None,
             blocking=False,
             risk_level=RiskLevel.MEDIUM if not is_ok else RiskLevel.LOW,
+            target="network",
         )
 
     def _check_duplicate_prerequisites(self, discovery: DiscoveryInfo) -> PrecheckResult:
@@ -1085,6 +1848,7 @@ class OraclePreviewExecutor:
             suggestion="确保主库有充足备份空间" if not is_ready else None,
             blocking=False,
             risk_level=RiskLevel.LOW,
+            target="global_configuration",
         )
 
     def _feature_flag_warnings(self) -> List[PrecheckResult]:
@@ -1106,6 +1870,7 @@ class OraclePreviewExecutor:
                     suggestion="根据策略在目标主机上提前创建/同步目录结构",
                     blocking=False,
                     risk_level=RiskLevel.LOW,
+                    target="planning",
                 )
             )
 
@@ -1124,6 +1889,7 @@ class OraclePreviewExecutor:
                     suggestion="在执行计划中参考路径并在脚本层面自行调整",
                     blocking=False,
                     risk_level=RiskLevel.LOW,
+                    target="planning",
                 )
             )
 
@@ -1141,6 +1907,7 @@ class OraclePreviewExecutor:
                     suggestion="通过自定义脚本或调度器实现归档清理策略",
                     blocking=False,
                     risk_level=RiskLevel.LOW,
+                    target="planning",
                 )
             )
 
@@ -1645,6 +2412,347 @@ class OraclePreviewExecutor:
 
         return SSHConfig(**kwargs)
 
+    @staticmethod
+    def _looks_like_ip(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        try:
+            ipaddress.ip_address(value.strip())
+            return True
+        except ValueError:
+            return False
+
+    def _detect_host_ips(self, executor: Optional[RemoteExecutor]) -> List[str]:
+        if not executor:
+            return []
+        ips: List[str] = []
+        primary_cmd = executor.execute("hostname -I", timeout=10)
+        if primary_cmd.success:
+            for token in primary_cmd.stdout.split():
+                token = token.strip()
+                if not token:
+                    continue
+                if self._looks_like_ip(token):
+                    ips.append(token)
+        if ips:
+            return sorted(set(ips))
+        fallback = executor.execute(
+            r"ip -4 addr show | awk '/inet / {print $2}' | cut -d/ -f1",
+            timeout=10,
+        )
+        if fallback.success:
+            for token in fallback.stdout.split():
+                if self._looks_like_ip(token):
+                    ips.append(token.strip())
+        return sorted(set(ips))
+
+    def _read_os_release(self, executor: Optional[RemoteExecutor]) -> Dict[str, Any]:
+        if not executor:
+            return {}
+        result = executor.execute("cat /etc/os-release 2>/dev/null", timeout=10)
+        meta: Dict[str, Any] = {}
+        if not result.success:
+            return meta
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, _, raw_value = line.partition("=")
+            value = raw_value.strip().strip('"').strip("'")
+            key_lower = key.strip().lower()
+            meta[key_lower] = value
+        pretty = meta.get("pretty_name") or meta.get("name")
+        distro_name = meta.get("name")
+        version = meta.get("version") or meta.get("version_id")
+        normalized: Dict[str, Any] = {}
+        if pretty:
+            normalized["os_pretty_name"] = pretty
+        if distro_name:
+            normalized["os_name"] = distro_name
+        if version:
+            normalized["os_version"] = version
+        return normalized
+
+    def _fetch_kernel_version(self, executor: Optional[RemoteExecutor]) -> Optional[str]:
+        if not executor:
+            return None
+        result = executor.execute("uname -sr", timeout=5)
+        if result.success:
+            line = (result.stdout or "").strip()
+            return line or None
+        return None
+
+    def _read_shell_variable(self, executor: Optional[RemoteExecutor], variable: str) -> Optional[str]:
+        if not executor or not variable or not re.match(r"^[A-Z0-9_]+$", variable):
+            return None
+        command = (
+            "bash -lc '"
+            "for profile in ~/.bash_profile ~/.bashrc ~/.profile; do "
+            "  if [ -f \"$profile\" ]; then source \"$profile\" >/dev/null 2>&1; fi; "
+            "done; "
+            f"printf \"%s\" \"${{{variable}}}\"'"
+        )
+        result = executor.execute(command, timeout=20)
+        if result.success:
+            value = (result.stdout or "").strip()
+            return value or None
+        return None
+
+    def _fetch_sqlplus_version(self, executor: Optional[RemoteExecutor], oracle_home: Optional[str]) -> Optional[str]:
+        if not executor or not oracle_home:
+            return None
+        quoted_home = shlex.quote(oracle_home)
+        command = (
+            "bash -lc '"
+            f"ORACLE_HOME={quoted_home}; "
+            "export ORACLE_HOME; "
+            "PATH=$ORACLE_HOME/bin:$PATH; "
+            "LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH; "
+            "\"$ORACLE_HOME\"/bin/sqlplus -v'"
+        )
+        result = executor.execute(command, timeout=30)
+        if not result.success:
+            return None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped
+        return None
+
+    def _fetch_opatch_inventory_version(self, executor: Optional[RemoteExecutor], oracle_home: Optional[str]) -> Optional[str]:
+        if not executor or not oracle_home:
+            return None
+        quoted_home = shlex.quote(oracle_home)
+        command = (
+            "bash -lc '"
+            f"ORACLE_HOME={quoted_home}; "
+            "export ORACLE_HOME; "
+            "PATH=$ORACLE_HOME/OPatch:$ORACLE_HOME/bin:$PATH; "
+            "cd \"$ORACLE_HOME/OPatch\" && ./opatch lsinventory 2>/dev/null | grep -i \"Oracle Database\"'"
+        )
+        result = executor.execute(command, timeout=120)
+        if not result.success:
+            return None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped
+        return None
+
+    def _derive_path_prefix(self, paths: List[str]) -> Optional[str]:
+        cleaned = [path.strip() for path in paths if path and path.strip()]
+        if not cleaned:
+            return None
+        sample = cleaned[0]
+        if "/" not in sample:
+            return sample
+        prefix = sample.rsplit("/", 1)[0]
+        return prefix or sample
+
+    def _fetch_path_samples(self, sql_executor: Optional[SqlExecutor], query: str) -> List[str]:
+        if not sql_executor:
+            return []
+        rows = sql_executor.query_multi_lines(query)
+        return rows[:MAX_PATH_SAMPLE_ROWS]
+
+    def _detect_primary_data_prefix(self) -> Optional[str]:
+        samples = self._fetch_path_samples(
+            self.primary_sql,
+            "SELECT file_name FROM v$datafile WHERE rownum <= {limit}".format(limit=MAX_PATH_SAMPLE_ROWS),
+        )
+        return self._derive_path_prefix(samples)
+
+    def _detect_primary_log_prefix(self) -> Optional[str]:
+        samples = self._fetch_path_samples(
+            self.primary_sql,
+            "SELECT member FROM v$logfile WHERE rownum <= {limit}".format(limit=MAX_PATH_SAMPLE_ROWS),
+        )
+        return self._derive_path_prefix(samples)
+
+    def _detect_primary_service_names(self) -> List[str]:
+        if not self.primary_sql:
+            return []
+        services = self.primary_sql.query_multi_lines("SELECT name FROM v$active_services")
+        return [service.strip() for service in services if service.strip()]
+
+    def _detect_primary_service_name(self) -> Optional[str]:
+        services = self._detect_primary_service_names()
+        if services:
+            return services[0]
+        return None
+
+    def _detect_primary_oracle_version(self) -> Optional[str]:
+        if not self.primary_sql:
+            return None
+        result = self.primary_sql.execute_sql("SELECT banner FROM v$version")
+        if not result.success:
+            return None
+        version = self._extract_release_version(result.stdout)
+        if version:
+            return version
+        for line in (result.stdout or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "oracle database" in stripped.lower():
+                version = self._extract_release_version(stripped)
+                if version:
+                    return version
+        return None
+
+    def _detect_standby_oracle_version(self, oracle_home: Optional[str]) -> Optional[str]:
+        sqlplus_version = self._fetch_sqlplus_version(self.standby_ssh, oracle_home)
+        if sqlplus_version:
+            return self._extract_release_version(sqlplus_version) or sqlplus_version
+        opatch_version = self._fetch_opatch_inventory_version(self.standby_ssh, oracle_home)
+        if opatch_version:
+            return self._extract_release_version(opatch_version) or opatch_version
+        return None
+
+    def _probe_listener_status(
+        self,
+        executor: Optional[RemoteExecutor],
+        oracle_home: Optional[str],
+        expected_port: Optional[int],
+        sid: Optional[str],
+    ) -> Dict[str, Any]:
+        if not executor or not oracle_home:
+            return {}
+        env = {
+            "ORACLE_HOME": oracle_home,
+            "PATH": f"{oracle_home}/bin:$PATH",
+            "LD_LIBRARY_PATH": f"{oracle_home}/lib:$LD_LIBRARY_PATH",
+        }
+        result = executor.execute("lsnrctl status", environment=env, timeout=60)
+        stdout = (result.stdout or "").strip()
+        ports = sorted({int(match) for match in re.findall(r"PORT\s*=\s*(\d+)", stdout)})
+        sid_normalized = (sid or "").strip().upper()
+        sid_matched = bool(sid_normalized and re.search(rf'Instance\\s+\"{re.escape(sid_normalized)}\"', stdout, re.IGNORECASE))
+        has_expected_port = expected_port in ports if expected_port else bool(ports)
+        return {
+            "success": result.success,
+            "stdout": stdout[:800],
+            "detected_ports": ports,
+            "expected_port": expected_port,
+            "sid_matched": sid_matched,
+            "has_expected_port": has_expected_port,
+        }
+
+    @staticmethod
+    def _extract_release_version(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = re.search(r"(?:Release|Version)\s+([0-9][0-9A-Za-z.\-]*)", stripped, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def _parse_version_components(text: Optional[str]) -> Optional[tuple[int, ...]]:
+        if not text:
+            return None
+        parts = [int(part) for part in re.findall(r"\d+", text)[:5]]
+        if not parts:
+            return None
+        return tuple(parts)
+
+    @staticmethod
+    def _trim_trailing_zeros(components: tuple[int, ...]) -> tuple[int, ...]:
+        trimmed = list(components)
+        while trimmed and trimmed[-1] == 0:
+            trimmed.pop()
+        return tuple(trimmed)
+
+    @staticmethod
+    def _pad_version_components(components: tuple[int, ...], width: int = 5) -> tuple[int, ...]:
+        padded = list(components[:width])
+        if len(padded) < width:
+            padded.extend([0] * (width - len(padded)))
+        return tuple(padded)
+
+    def _classify_version_compatibility(
+        self,
+        primary_version: str,
+        standby_version: str,
+    ) -> tuple[str, Optional[str], str]:
+        """将版本兼容性分成完全一致、差异较小、差异过大三段。"""
+        if not primary_version or not standby_version:
+            return "warn", "版本信息不完整，无法完成精确兼容性判断", "incomplete"
+
+        primary_components = self._parse_version_components(primary_version)
+        standby_components = self._parse_version_components(standby_version)
+        if not primary_components or not standby_components:
+            return "warn", "版本信息格式无法解析，建议补充探测结果", "unparsed"
+
+        if self._trim_trailing_zeros(primary_components) == self._trim_trailing_zeros(standby_components):
+            return "pass", None, "exact_match"
+
+        primary_padded = self._pad_version_components(primary_components)
+        standby_padded = self._pad_version_components(standby_components)
+        if primary_padded[0] != standby_padded[0]:
+            return "fail", "主备数据库大版本差异过大，请使用兼容版本", "major_mismatch"
+
+        diff_indexes = [
+            index
+            for index, (left, right) in enumerate(zip(primary_padded, standby_padded))
+            if left != right
+        ]
+        if len(diff_indexes) == 1:
+            index = diff_indexes[0]
+            if abs(primary_padded[index] - standby_padded[index]) <= 1:
+                if all(value == 0 for value in primary_padded[index + 1:]) and all(
+                    value == 0 for value in standby_padded[index + 1:]
+                ):
+                    return "warn", "主备版本差异较小，建议保持一致以降低兼容性风险", "minor_diff"
+
+        return "fail", "主备版本差异过大，请使用兼容版本", "major_diff"
+
+    def _collect_disk_usage(self, executor: Optional[RemoteExecutor], path: Optional[str]) -> Dict[str, Any]:
+        if not executor or not path:
+            return {}
+        normalized = path.strip()
+        if not normalized or normalized.startswith("+"):
+            return {}
+        command = f"df -P {shlex.quote(normalized)} | tail -1"
+        result = executor.execute(command, timeout=15)
+        if not result.success:
+            return {}
+        line = ""
+        for candidate in result.stdout.splitlines()[::-1]:
+            stripped = candidate.strip()
+            if stripped:
+                line = stripped
+                break
+        if not line:
+            return {}
+        return self._parse_disk_usage_line(line)
+
+    @staticmethod
+    def _parse_disk_usage_line(line: str) -> Dict[str, Any]:
+        parts = line.split()
+        if len(parts) < 6:
+            return {"raw": line}
+        filesystem, size, used, avail, percent, mount = parts[:6]
+        percent_value: Optional[int] = None
+        match = re.search(r"(\d+)", percent)
+        if match:
+            try:
+                percent_value = int(match.group(1))
+            except ValueError:
+                percent_value = None
+        return {
+            "raw": line,
+            "filesystem": filesystem,
+            "size": size,
+            "used": used,
+            "available": avail,
+            "percent": percent_value,
+            "mount_point": mount,
+        }
+
 
 def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
     """构造演示模式的预览数据，便于前端在无真实主机时联调"""
@@ -1658,13 +2766,17 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
         "hostname": primary_host.split(".")[0],
         "ip_address": "10.0.0.10",
         "os_type": "Linux x86_64",
+        "os_version": "Ubuntu 22.04",
         "kernel": "5.15.0-86-generic",
+        "kernel_version": "5.15.0-86-generic",
     }
     discovery.standby_host = {
         "host": standby_host,
         "hostname": standby_host.split(".")[0],
         "ip_address": "10.0.0.11",
         "os_type": "Linux x86_64",
+        "os_version": "Ubuntu 22.04",
+        "kernel_version": "5.15.0-86-generic",
     }
     discovery.primary_oracle = OracleEnvInfo(
         version="19.18.0.0.0",
@@ -1676,6 +2788,14 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
         is_cdb=request.primary_is_cdb if request.primary_is_cdb is not None else True,
         db_unique_name=request.db_unique_name_primary or f"{shared_db_name}_PRIM",
         service_name=request.primary_service_name or f"{shared_db_name}_PRIM",
+        sqlplus_version="SQL*Plus: Release 19.0.0.0.0",
+        instance_status="OPEN",
+        listener_validation={
+            "status": "pass",
+            "detected_ports": [request.primary_listener_port or 1521],
+            "expected_port": request.primary_listener_port or 1521,
+            "sid_matched": True,
+        },
     )
     discovery.standby_oracle = OracleEnvInfo(
         version="19.18.0.0.0",
@@ -1687,6 +2807,13 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
         is_cdb=request.standby_is_cdb if request.standby_is_cdb is not None else True,
         db_unique_name=request.db_unique_name_standby or f"{shared_db_name}_STBY",
         service_name=request.standby_service_name or f"{shared_db_name}_STBY",
+        sqlplus_version="SQL*Plus: Release 19.0.0.0.0",
+        listener_validation={
+            "status": "warn",
+            "detected_ports": [request.standby_listener_port or 1521],
+            "expected_port": request.standby_listener_port or 1521,
+            "sid_matched": False,
+        },
     )
     discovery.primary_db = {
         "role": "PRIMARY",
@@ -1694,6 +2821,8 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
         "database_role": "PRIMARY",
         "archive_mode": "ARCHIVELOG",
         "force_logging": True,
+        "instance_status": "OPEN",
+        "is_cdb": True,
     }
     discovery.network = {
         "primary_listener_status": "READY",
@@ -1701,19 +2830,87 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
         "standby_listener_port": request.standby_listener_port or 1521,
         "log_transport_mode": (request.log_transport_mode or "ASYNC").upper(),
         "tns_check": "ok",
+        "primary_listener_check": {
+            "status": "pass",
+            "detected_ports": [request.primary_listener_port or 1521],
+            "expected_port": request.primary_listener_port or 1521,
+            "sid_matched": True,
+            "raw": "demo",
+        },
+        "standby_listener_check": {
+            "status": "warn",
+            "detected_ports": [request.standby_listener_port or 1521],
+            "expected_port": request.standby_listener_port or 1521,
+            "sid_matched": False,
+        },
     }
     discovery.storage = {
         "storage_type": request.primary_storage_type or "fs",
         "primary_storage_type": request.primary_storage_type or "fs",
         "standby_storage_type": request.standby_storage_type or request.primary_storage_type or "fs",
+        "primary_storage_input_type": request.primary_storage_type or "fs",
+        "standby_storage_input_type": request.standby_storage_type or request.primary_storage_type or "fs",
+        "primary_storage_detected_type": request.primary_storage_type or "fs",
         "data_files_path": request.primary_data_file_path or request.data_files_path or f"/u01/oradata/{shared_db_name}",
         "standby_data_files_path": request.standby_data_file_path or f"/u01/adg/{shared_db_name}",
         "archivelog_path": request.archivelog_path or f"/u01/oradata/{shared_db_name}/archivelog",
+        "standby_archive_path": request.standby_archive_path or request.archivelog_path or f"/u01/adg/{shared_db_name}/archivelog",
         "primary_disk_usage": "120G used / 250G total",
         "standby_disk_usage": "80G used / 250G total",
         "redo_file_path_strategy": request.redo_file_path_strategy or "same",
         "data_file_path_strategy": request.data_file_path_strategy or "same",
     }
+    discovery.storage["primary_data_detected_prefix"] = discovery.storage["data_files_path"]
+    discovery.storage["primary_log_detected_prefix"] = request.primary_redo_file_path or discovery.storage["data_files_path"]
+    discovery.storage["primary_data"] = {
+        "input_path": discovery.storage["data_files_path"],
+        "detected_prefix": discovery.storage["data_files_path"],
+        "exists": True,
+        "status": "ok",
+        "writable": True,
+        "has_files": True,
+        "disk_usage": {"raw": "120G used / 250G total", "percent": 48},
+    }
+    discovery.storage["primary_log"] = {
+        "input_path": request.primary_redo_file_path or discovery.storage["data_files_path"],
+        "detected_prefix": request.primary_redo_file_path or discovery.storage["data_files_path"],
+        "exists": True,
+        "status": "ok",
+        "writable": True,
+        "has_files": True,
+        "disk_usage": {"raw": "40G used / 250G total", "percent": 16},
+    }
+    discovery.storage["standby_data"] = {
+        "input_path": discovery.storage["standby_data_files_path"],
+        "exists": True,
+        "status": "ok",
+        "writable": True,
+        "has_files": False,
+        "disk_usage": {"raw": "80G used / 250G total", "percent": 32},
+    }
+    discovery.storage["standby_log"] = {
+        "input_path": request.standby_redo_file_path or discovery.storage["standby_data_files_path"],
+        "exists": False,
+        "status": "not_exists",
+        "writable": False,
+        "has_files": False,
+    }
+    discovery.storage["primary_data_dir_status"] = "ok"
+    discovery.storage["primary_data_dir_writable"] = True
+    discovery.storage["primary_data_dir_has_files"] = True
+    discovery.storage["primary_log_dir_status"] = "ok"
+    discovery.storage["primary_log_dir_writable"] = True
+    discovery.storage["primary_log_dir_has_files"] = True
+    discovery.storage["standby_data_dir_status"] = "ok"
+    discovery.storage["standby_data_dir_writable"] = True
+    discovery.storage["standby_data_dir_has_files"] = False
+    discovery.storage["standby_log_dir_status"] = "not_exists"
+    discovery.storage["standby_log_dir_writable"] = False
+    discovery.storage["standby_log_dir_has_files"] = False
+    discovery.storage["primary_disk_usage_percent"] = 48
+    discovery.storage["primary_log_disk_usage_percent"] = 16
+    discovery.storage["standby_disk_usage_percent"] = 32
+    discovery.storage["standby_log_disk_usage_percent"] = None
     discovery.conflicts = ["standby listener 未启用 ADR", "建议开启强制日志"]
 
     prechecks = [
@@ -1725,16 +2922,18 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
             evidence={"archive_mode": "ARCHIVELOG"},
             blocking=False,
             risk_level=RiskLevel.LOW,
+            target="primary_database",
         ),
         PrecheckResult(
             check_name="force_logging",
             category="configuration",
-            result="warn",
+            result="fail",
             message="主库尚未启用 Force Logging",
             suggestion="执行 ALTER DATABASE FORCE LOGGING;",
             evidence={"force_logging": False},
             blocking=False,
             risk_level=RiskLevel.MEDIUM,
+            target="primary_database",
         ),
         PrecheckResult(
             check_name="listener_port_conflict",
@@ -1745,6 +2944,7 @@ def build_demo_preview_response(request: PreviewRequest) -> PreviewResponse:
             evidence={"standby_listener_port": request.standby_listener_port or 1521},
             blocking=True,
             risk_level=RiskLevel.HIGH,
+            target="standby_listener",
         ),
     ]
 
