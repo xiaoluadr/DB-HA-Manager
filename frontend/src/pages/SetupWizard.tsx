@@ -32,6 +32,9 @@ import {
   ThunderboltOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
+  CheckCircleFilled,
+  ExclamationCircleFilled,
+  CloseCircleFilled,
   CheckCircleOutlined,
   ClockCircleOutlined,
   DeploymentUnitOutlined,
@@ -234,6 +237,7 @@ const FORM_FIELD_LABELS: Record<string, string> = {
   primaryOracleHome: '主库 ORACLE_HOME',
   primaryDbUniqueName: '主库 DB_UNIQUE_NAME',
   primaryOracleBase: '主库 ORACLE_BASE',
+  primaryVersion: '主库 Oracle 版本',
   primarySysPassword: '主库 SYS 密码',
   primaryListenerPort: '主库监听端口',
   primaryServiceName: '主库 SERVICE_NAME',
@@ -243,6 +247,7 @@ const FORM_FIELD_LABELS: Record<string, string> = {
   standbyOracleHome: '备库 ORACLE_HOME',
   standbyDbUniqueName: '备库 DB_UNIQUE_NAME',
   standbyOracleBase: '备库 ORACLE_BASE',
+  standbyVersion: '备库 Oracle 版本',
   standbyListenerPort: '备库监听端口',
   standbyServiceName: '备库 SERVICE_NAME',
   standbyStorageType: '备库存储类型',
@@ -361,7 +366,7 @@ type FieldValueSource =
   | 'inherit_primary'
   | 'planned'
 
-type StatusTagType = ConnectivityStatus | 'warning'
+type StatusTagType = ConnectivityStatus | 'warning' | 'unknown'
 
 interface FieldDisplayMeta {
   value: any
@@ -378,6 +383,9 @@ interface FieldValueRowProps {
   extra?: ReactNode
   rowKey?: string
   customValue?: ReactNode
+  sourceTagLabel?: string
+  sourceTagColor?: string
+  disableStatusSourceMapping?: boolean
 }
 
 interface FieldOverrideConfig {
@@ -393,23 +401,11 @@ interface FieldOverrideConfig {
 
 const VALUE_SOURCE_TAGS: Record<FieldValueSource, { label: string; color: string }> = {
   auto_success: { label: '自动探测成功', color: 'var(--green)' },
-  auto_failed: { label: '自动探测失败', color: 'var(--red)' },
+  auto_failed: { label: '探测失败', color: 'var(--red)' },
   user_input: { label: '用户输入', color: '#9254de' },
   user_override: { label: '用户输入', color: 'var(--orange)' },
   inherit_primary: { label: '继承主库', color: 'var(--primary)' },
   planned: { label: '计划值', color: 'var(--text2)' },
-}
-
-const DISCOVERY_STATUS_META: Record<StatusTagType, { label: string; color: string }> = {
-  success: { label: '成功', color: 'var(--green)' },
-  failed: { label: '失败', color: 'var(--red)' },
-  timeout: { label: '超时', color: 'var(--orange)' },
-  unavailable: { label: '不可用', color: 'var(--text2)' },
-  missing: { label: '缺失', color: 'var(--text2)' },
-  partial: { label: '部分', color: 'var(--primary)' },
-  skipped: { label: '跳过', color: 'var(--border)' },
-  unknown: { label: '未探测到', color: 'var(--border)' },
-  warning: { label: '告警', color: 'var(--yellow)' },
 }
 
 const STORAGE_SELECT_OPTIONS: { label: string; value: string }[] = [
@@ -518,6 +514,285 @@ const STANDBY_OVERRIDE_FIELD_ORDER: OverrideFieldKey[] = [
   'standby_is_cdb',
 ]
 
+const USER_INPUT_REQUIRED_FIELDS = new Set([
+  'primaryHost', 'primaryPort', 'primarySshUser', 'primarySid', 'primaryOracleHome',
+  'primaryDataFilePath', 'primaryRedoFilePath', 'primaryListenerPort',
+  'standbyHost', 'standbyPort', 'standbySshUser', 'standbySid',
+  'standbyOracleHome', 'standbyDbUniqueName', 'standbyDataFilePath', 'standbyRedoFilePath',
+])
+
+const GROUP_CHECK_MAP: Record<string, string[]> = {
+  'primary-env': [
+    'primary_instance_status',
+    'primary_oracle_home_consistency',
+    'primary_oracle_base_consistency',
+    'primary_storage_type_consistency',
+    'primary_is_cdb_consistency',
+    'primary_db_unique_name_consistency',
+    'primary_service_name_consistency',
+    'primary_ping_connectivity',
+    'primary_ssh_port_reachability',
+    'primary_listener_port_reachability',
+    'primary_listener_status',
+    'primary_listener_port_validation',
+    'primary_network_connectivity',
+  ],
+  'standby-env': [
+    'standby_sid_conflict',
+    'standby_db_unique_name_uniqueness',
+    'standby_oracle_home_consistency',
+    'standby_oracle_base_consistency',
+    'standby_ping_connectivity',
+    'standby_ssh_port_reachability',
+    'standby_listener_port_reachability',
+    'standby_listener_status',
+    'standby_listener_port_validation',
+    'standby_network_connectivity',
+  ],
+  'setup-env': [
+    'primary_standby_host_separation',
+    'primary_data_path_alignment',
+    'primary_redo_path_alignment',
+    'standby_data_dir_status',
+    'standby_log_dir_status',
+    'standby_archive_dir_status',
+    'standby_adump_dir_status',
+    'standby_space',
+    'archive_mode',
+    'force_logging',
+    'version_compatibility',
+    'storage_type_alignment',
+  ],
+}
+
+interface PrecheckDisplayMeta {
+  title: string
+  description: string
+  scope: string
+  relatedFields?: string[]
+}
+
+interface StructuredPrecheckResult {
+  title?: string
+  description?: string
+  detected_result?: string
+  summary?: string
+  scope?: string
+  related_fields?: string[]
+}
+
+type StructuredPrecheck = PrecheckResult & StructuredPrecheckResult
+
+const PRECHECK_DISPLAY_META: Record<string, PrecheckDisplayMeta> = {
+  primary_instance_status: {
+    title: '主库实例状态检查',
+    description: '确认用户输入的主库 SID 对应实例是否真实存在且处于可用状态。',
+    scope: '主库环境',
+    relatedFields: ['primarySid'],
+  },
+  primary_oracle_home_consistency: {
+    title: '主库 ORACLE_HOME 一致性检查',
+    description: '确认主库 ORACLE_HOME 路径存在，并与安装环境保持一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryOracleHome'],
+  },
+  primary_oracle_base_consistency: {
+    title: '主库 ORACLE_BASE 一致性检查',
+    description: '确认主库 ORACLE_BASE 路径存在，并与安装环境探测结果一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryOracleBase'],
+  },
+  primary_db_unique_name_consistency: {
+    title: '主库 DB_UNIQUE_NAME 检查',
+    description: '确认主库实际 DB_UNIQUE_NAME 与配置输入保持一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryDbUniqueName'],
+  },
+  primary_service_name_consistency: {
+    title: '主库 SERVICE_NAME 检查',
+    description: '确认主库活跃服务列表包含当前配置的 SERVICE_NAME。',
+    scope: '主库环境',
+    relatedFields: ['primaryServiceName'],
+  },
+  primary_is_cdb_consistency: {
+    title: '主库 CDB 一致性检查',
+    description: '确认主库 CDB 配置与数据库实际探测结果一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryIsCdb'],
+  },
+  primary_storage_type_consistency: {
+    title: '主库存储类型检查',
+    description: '基于主库数据文件路径前缀判定 ASM / FS，并确认字段展示值与探测结果一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryStorageType', 'primaryDataFilePath'],
+  },
+  primary_listener_status: {
+    title: '主库监听状态检查',
+    description: '确认主库监听进程已正常运行。',
+    scope: '主库环境',
+    relatedFields: ['primaryListenerPort'],
+  },
+  primary_ping_connectivity: {
+    title: '主库网络 Ping 检查',
+    description: '确认备库主机能够 Ping 通用户指定的主库 IP/主机。',
+    scope: '网络与主机',
+    relatedFields: ['primaryHost'],
+  },
+  primary_ssh_port_reachability: {
+    title: '主库 SSH 端口可达检查',
+    description: '确认备库主机能够访问用户指定主库的 SSH 端口；这里只校验端口可达，不等于完成 SSH 登录认证。',
+    scope: '网络与主机',
+    relatedFields: ['primaryHost'],
+  },
+  primary_listener_port_reachability: {
+    title: '主库监听端口可达检查',
+    description: '确认备库主机能够访问用户指定主库的监听端口。',
+    scope: '网络与主机',
+    relatedFields: ['primaryHost', 'primaryListenerPort'],
+  },
+  primary_listener_port_validation: {
+    title: '主库监听端口校验',
+    description: '确认主库实际监听端口与表单输入一致。',
+    scope: '主库环境',
+    relatedFields: ['primaryListenerPort'],
+  },
+  primary_network_connectivity: {
+    title: '主库网络互通检查',
+    description: '汇总主库相关的 ping、SSH 和监听端口可达性，确保网络链路满足搭建前提。',
+    scope: '网络与主机',
+    relatedFields: ['primaryHost', 'standbyHost', 'primaryListenerPort'],
+  },
+  standby_sid_conflict: {
+    title: '备库 SID 冲突检查',
+    description: '确认目标备库 SID 当前未被现有实例占用。',
+    scope: '备库环境',
+    relatedFields: ['standbySid'],
+  },
+  standby_db_unique_name_uniqueness: {
+    title: '备库 DB_UNIQUE_NAME 唯一性检查',
+    description: '确认备库 DB_UNIQUE_NAME 不与主库重复，这是创建备库前的硬性前提。',
+    scope: '备库环境',
+    relatedFields: ['primaryDbUniqueName', 'standbyDbUniqueName'],
+  },
+  standby_oracle_home_consistency: {
+    title: '备库 ORACLE_HOME 一致性检查',
+    description: '确认备库 ORACLE_HOME 路径存在，并与安装环境保持一致。',
+    scope: '备库环境',
+    relatedFields: ['standbyOracleHome'],
+  },
+  standby_oracle_base_consistency: {
+    title: '备库 ORACLE_BASE 一致性检查',
+    description: '确认备库 ORACLE_BASE 路径存在，并与安装环境探测结果一致。',
+    scope: '备库环境',
+    relatedFields: ['standbyOracleBase'],
+  },
+  standby_listener_status: {
+    title: '备库监听状态检查',
+    description: '确认备库监听进程已正常运行。',
+    scope: '备库环境',
+    relatedFields: ['standbyListenerPort'],
+  },
+  standby_ping_connectivity: {
+    title: '备库网络 Ping 检查',
+    description: '确认主库主机能够 Ping 通用户指定的备库 IP/主机。',
+    scope: '网络与主机',
+    relatedFields: ['standbyHost'],
+  },
+  standby_ssh_port_reachability: {
+    title: '备库 SSH 端口可达检查',
+    description: '确认主库主机能够访问用户指定备库的 SSH 端口；这里只校验端口可达，不等于完成 SSH 登录认证。',
+    scope: '网络与主机',
+    relatedFields: ['standbyHost'],
+  },
+  standby_listener_port_reachability: {
+    title: '备库监听端口可达检查',
+    description: '确认主库主机能够访问用户指定备库的监听端口。',
+    scope: '网络与主机',
+    relatedFields: ['standbyHost', 'standbyListenerPort'],
+  },
+  standby_listener_port_validation: {
+    title: '备库监听端口校验',
+    description: '确认备库实际监听端口与表单输入一致。',
+    scope: '备库环境',
+    relatedFields: ['standbyListenerPort'],
+  },
+  standby_network_connectivity: {
+    title: '备库网络互通检查',
+    description: '汇总备库相关的 ping、SSH 和监听端口可达性，确保网络链路满足搭建前提。',
+    scope: '网络与主机',
+    relatedFields: ['standbyHost', 'primaryHost', 'standbyListenerPort'],
+  },
+  primary_data_path_alignment: {
+    title: '主库数据文件路径检查',
+    description: '确认主库数据文件实际路径前缀与当前配置一致。',
+    scope: '搭建环境',
+    relatedFields: ['primaryDataFilePath'],
+  },
+  primary_redo_path_alignment: {
+    title: '主库联机日志路径检查',
+    description: '确认主库联机日志实际路径前缀与当前配置一致。',
+    scope: '搭建环境',
+    relatedFields: ['primaryRedoFilePath'],
+  },
+  standby_data_dir_status: {
+    title: '备库数据目录检查',
+    description: '确认备库数据目录存在、可写且不会覆盖已有文件。',
+    scope: '搭建环境',
+    relatedFields: ['standbyDataFilePath'],
+  },
+  standby_log_dir_status: {
+    title: '备库日志目录检查',
+    description: '确认备库联机日志目录存在、可写且不会覆盖已有文件。',
+    scope: '搭建环境',
+    relatedFields: ['standbyRedoFilePath'],
+  },
+  standby_archive_dir_status: {
+    title: '备库归档目录检查',
+    description: '确认备库归档目录存在、可写、不会覆盖已有文件且空间使用率合理。',
+    scope: '搭建环境',
+    relatedFields: ['standbyArchivePath'],
+  },
+  standby_adump_dir_status: {
+    title: '备库 adump 目录检查',
+    description: '确认备库 adump 目录的推导依据可信，且目录存在、可写、不会覆盖已有文件并具备可用容量。',
+    scope: '搭建环境',
+    relatedFields: ['standbyOracleBase', 'standbyDbUniqueName'],
+  },
+  archive_mode: {
+    title: '主库归档模式检查',
+    description: '确认主库已启用 ARCHIVELOG，这是 ADG 搭建前置条件。',
+    scope: '搭建环境',
+  },
+  force_logging: {
+    title: '主库 Force Logging 检查',
+    description: '确认主库已启用 Force Logging，避免 redo 传输不完整。',
+    scope: '搭建环境',
+  },
+  version_compatibility: {
+    title: '主备版本兼容性检查',
+    description: '确认主备 Oracle 版本处于可兼容范围内。',
+    scope: '搭建环境',
+  },
+  storage_type_alignment: {
+    title: '主备存储类型一致性检查',
+    description: '确认主备存储类型保持一致，避免后续目录映射异常。',
+    scope: '搭建环境',
+    relatedFields: ['primaryStorageType', 'standbyStorageType'],
+  },
+  standby_space: {
+    title: '备库目录容量检查',
+    description: '汇总确认备库数据目录与日志目录的剩余空间是否充足。',
+    scope: '搭建环境',
+    relatedFields: ['standbyDataFilePath', 'standbyRedoFilePath'],
+  },
+  primary_standby_host_separation: {
+    title: '主备主机分离检查',
+    description: '确认主库与备库不是同一 IP，避免路径与角色混用风险。',
+    scope: '网络与主机',
+    relatedFields: ['primaryHost', 'standbyHost'],
+  },
+}
+
 const REQUIRED_DISCOVERY_FIELDS = Object.values(FIELD_OVERRIDE_CONFIG).map((config) => ({
   formField: config.formField,
   label: config.label,
@@ -544,7 +819,7 @@ const formatDuration = (seconds?: number | null): string => {
 
 const formatValue = (value: any): string => {
   if (value === null || value === undefined || value === '') {
-    return '未探测到'
+    return '-'
   }
   if (typeof value === 'boolean') {
     return value ? '是' : '否'
@@ -559,28 +834,42 @@ const formatValue = (value: any): string => {
   return String(value)
 }
 
-const formatBoolean = (value: any, trueLabel = '是', falseLabel = '否'): string => {
+const formatStorageAmount = (value: unknown): string | null => {
   if (value === null || value === undefined) {
-    return '未探测到'
+    return null
   }
-  return value ? trueLabel : falseLabel
-}
-
-const formatDiskUsage = (usage?: { raw?: string; percent?: number; mount_point?: string }): string => {
-  if (!usage) {
-    return '未探测到'
+  const raw = String(value).trim()
+  if (!raw) {
+    return null
   }
-  const pieces: string[] = []
-  if (usage.raw) {
-    pieces.push(usage.raw)
+  const normalized = raw.replace(/,/g, '')
+  if (/^\d+$/.test(normalized)) {
+    const kib = Number(normalized)
+    if (!Number.isFinite(kib)) {
+      return raw
+    }
+    const gib = kib / (1024 * 1024)
+    return `${gib.toFixed(1)} GB`
   }
-  if (typeof usage.percent === 'number') {
-    pieces.push(`${usage.percent}%`)
+  const match = normalized.match(/^(\d+(?:\.\d+)?)([KMGTP]?)$/i)
+  if (!match) {
+    return raw
   }
-  if (usage.mount_point) {
-    pieces.push(`挂载 ${usage.mount_point}`)
+  const amount = Number(match[1])
+  const unit = match[2].toUpperCase()
+  if (!Number.isFinite(amount)) {
+    return raw
   }
-  return pieces.length ? pieces.join(' / ') : '未探测到'
+  const factorMap: Record<string, number> = {
+    '': 1 / (1024 * 1024),
+    K: 1 / (1024 * 1024),
+    M: 1 / 1024,
+    G: 1,
+    T: 1024,
+    P: 1024 * 1024,
+  }
+  const gib = amount * (factorMap[unit] ?? 1)
+  return `${gib.toFixed(1)} GB`
 }
 
 const PATH_STRATEGY_LABEL_MAP = PATH_STRATEGY_OPTIONS.reduce<Record<PathStrategy, string>>((acc, item) => {
@@ -594,6 +883,607 @@ const DUPLICATE_MODE_LABELS: Record<DuplicateMode, string> = {
 }
 
 const isNil = (value: any): boolean => value === null || value === undefined || value === ''
+
+const toSentence = (value?: string): string => {
+  if (!value) return '未提供更多原因信息。'
+  const trimmed = value.trim()
+  if (!trimmed) return '未提供更多原因信息。'
+  return /[。！？.!?]$/.test(trimmed) ? trimmed : `${trimmed}。`
+}
+
+const getPrecheckDisplayMeta = (item: PrecheckResult): PrecheckDisplayMeta => {
+  const structured = item as PrecheckResult & StructuredPrecheckResult
+  const meta = PRECHECK_DISPLAY_META[item.check_name]
+  if (meta) {
+    return {
+      title: structured.title || meta.title,
+      description: structured.description || meta.description,
+      scope: structured.scope || meta.scope,
+      relatedFields: structured.related_fields?.length ? structured.related_fields : meta.relatedFields,
+    }
+  }
+  return {
+    title: structured.title || item.message || item.check_name,
+    description: structured.description || '用于确认当前环境是否满足 ADG 搭建前置条件。',
+    scope: structured.scope || item.target || item.category || '环境校验',
+  }
+}
+
+const getPrecheckDetectedResultText = (item: PrecheckResult): string | null => {
+  const structured = item as PrecheckResult & StructuredPrecheckResult
+  if (item.check_name === 'standby_db_unique_name_uniqueness') {
+    if (structured.detected_result?.trim()) {
+      return structured.detected_result.trim()
+    }
+    const primaryUniqueName = structured.evidence?.primary_unique_name?.toString().trim()
+    return primaryUniqueName ? `主库 DB_UNIQUE_NAME 为：${primaryUniqueName}` : null
+  }
+  if (
+    item.check_name === 'standby_data_dir_status'
+    || item.check_name === 'standby_log_dir_status'
+    || item.check_name === 'standby_archive_dir_status'
+    || item.check_name === 'standby_adump_dir_status'
+  ) {
+    if (structured.detected_result?.trim()) {
+      return structured.detected_result.trim()
+    }
+    const exists = structured.evidence?.exists
+    const writable = structured.evidence?.writable
+    const hasFiles = structured.evidence?.has_files
+    const diskUsage = structured.evidence?.disk_usage_percent
+    return [
+      `目录存在：${exists === true ? '是' : exists === false ? '否' : '未知'}`,
+      `可写：${writable === true ? '是' : writable === false ? '否' : '未知'}`,
+      `已有文件：${hasFiles ? '有' : '无'}`,
+      `空间使用率：${typeof diskUsage === 'number' ? `${diskUsage}%` : '未知'}`,
+    ].join('；')
+  }
+  if (item.check_name === 'primary_oracle_base_consistency') {
+    if (structured.detected_result?.trim()) {
+      return structured.detected_result.trim()
+    }
+    const detectedValue = structured.evidence?.detected_oracle_base?.toString().trim()
+    if (!detectedValue) {
+      return '安装环境探测未获取到 ORACLE_BASE。'
+    }
+    return `安装环境探测到 ORACLE_BASE 为：${detectedValue}`
+  }
+  if (item.check_name === 'standby_oracle_base_consistency') {
+    if (structured.detected_result?.trim()) {
+      return structured.detected_result.trim()
+    }
+    const detectedValue = structured.evidence?.detected_oracle_base?.toString().trim()
+    if (!detectedValue) {
+      return '安装环境探测未获取到 ORACLE_BASE。'
+    }
+    return `安装环境探测到 ORACLE_BASE 为：${detectedValue}`
+  }
+  return structured.detected_result?.trim() || null
+}
+
+const getPrecheckSummaryText = (item: PrecheckResult): string | null => {
+  const structured = item as PrecheckResult & StructuredPrecheckResult
+  if (item.check_name === 'standby_oracle_base_consistency') {
+    return null
+  }
+  if (
+    item.check_name === 'standby_db_unique_name_uniqueness'
+    || item.check_name === 'standby_data_dir_status'
+    || item.check_name === 'standby_log_dir_status'
+    || item.check_name === 'standby_archive_dir_status'
+    || item.check_name === 'standby_adump_dir_status'
+  ) {
+    return structured.summary?.trim() || null
+  }
+  return structured.summary?.trim() || null
+}
+
+const getPrecheckUserInputText = (
+  item: PrecheckResult,
+  formValues: Partial<SetupFormData>,
+  _info?: DiscoveryInfo,
+): string | null => {
+  if (item.check_name === 'primary_oracle_base_consistency') {
+    const inputValue = formValues.primaryOracleBase?.trim()
+    return inputValue ? `用户输入的值为：${inputValue}` : null
+  }
+  if (item.check_name === 'primary_storage_type_consistency') {
+    const inputValue = formValues.primaryStorageType
+    return inputValue ? `用户输入的存储类型为：${String(inputValue).toUpperCase()}` : null
+  }
+  if (item.check_name === 'primary_is_cdb_consistency') {
+    if (typeof formValues.primaryIsCdb === 'boolean') {
+      return `用户输入的主库 CDB 属性为：${formValues.primaryIsCdb ? 'CDB' : '非 CDB'}`
+    }
+    return null
+  }
+  if (item.check_name === 'primary_service_name_consistency') {
+    const inputValue = formValues.primaryServiceName?.trim()
+    return inputValue ? `用户输入的 SERVICE_NAME 为：${inputValue}` : null
+  }
+  if (item.check_name === 'standby_oracle_base_consistency') {
+    const inputValue = formValues.standbyOracleBase?.trim()
+    return inputValue ? `用户输入的值为：${inputValue}` : null
+  }
+  if (item.check_name === 'standby_db_unique_name_uniqueness') {
+    const inputValue = formValues.standbyDbUniqueName?.trim()
+    return inputValue ? `用户输入的备库 DB_UNIQUE_NAME 为：${inputValue}` : null
+  }
+  if (item.check_name === 'standby_data_dir_status') {
+    const inputValue = formValues.standbyDataFilePath?.trim()
+    return inputValue ? `用户输入的备库数据目录为：${inputValue}` : null
+  }
+  if (item.check_name === 'standby_log_dir_status') {
+    const inputValue = formValues.standbyRedoFilePath?.trim()
+    return inputValue ? `用户输入的备库联机日志目录为：${inputValue}` : null
+  }
+  if (item.check_name === 'standby_archive_dir_status') {
+    const inputValue = formValues.standbyArchivePath?.trim()
+    return inputValue ? `用户输入的备库归档目录为：${inputValue}` : null
+  }
+  if (item.check_name === 'primary_listener_status') {
+    const port = formValues.primaryListenerPort
+    return port ? `用户输入的监听端口为：${port}` : null
+  }
+  if (item.check_name === 'primary_listener_port_validation') {
+    const port = formValues.primaryListenerPort
+    return port ? `用户输入的监听端口为：${port}` : null
+  }
+  if (item.check_name === 'standby_listener_status') {
+    const port = formValues.standbyListenerPort
+    return port ? `用户输入的监听端口为：${port}` : null
+  }
+  if (item.check_name === 'standby_listener_port_validation') {
+    const port = formValues.standbyListenerPort
+    return port ? `用户输入的监听端口为：${port}` : null
+  }
+  return null
+}
+
+const getPrecheckRelatedFields = (item: PrecheckResult, fallback?: string[]): string[] => {
+  const structured = item as PrecheckResult & StructuredPrecheckResult
+  if (structured.related_fields?.length) {
+    return structured.related_fields
+  }
+  return fallback || []
+}
+
+const getPrecheckFinalResultText = (item: PrecheckResult): string => {
+  const structured = item as PrecheckResult & StructuredPrecheckResult
+  if (item.check_name === 'primary_oracle_base_consistency') {
+    const detectedValue = structured.evidence?.detected_oracle_base?.toString().trim()
+    const inputValue = structured.evidence?.configured_oracle_base?.toString().trim()
+    const exists = structured.evidence?.exists
+    const matches = structured.evidence?.matches
+    const summaryText = structured.summary?.trim()
+    if (!detectedValue && summaryText) {
+      if (summaryText.includes('一致')) {
+        return '自动探测与用户输入一致，符合预期。'
+      }
+      if (summaryText.includes('未获取')) {
+        return inputValue
+          ? '当前未获取到安装环境探测值，字段继续展示用户输入，并提示人工核对安装环境。'
+          : '当前未获取到安装环境探测值，字段应标记为探测失败。'
+      }
+      return '已获取安装环境探测值，可直接作为字段最终展示值。'
+    }
+    if (!detectedValue) {
+      return inputValue
+        ? '当前未获取到安装环境探测值，字段继续展示用户输入，并提示人工核对安装环境。'
+        : '当前未能形成有效的安装环境探测值，字段应标记为探测失败。'
+    }
+    if (inputValue && matches === false) {
+      return '自动探测与用户输入不一致，字段继续展示用户输入，预检查提示人工核对安装环境。'
+    }
+    if (exists === false) {
+      return '已获取安装环境探测值，但该路径不存在，请先核对主库安装环境。'
+    }
+    if (inputValue) {
+      return '自动探测与用户输入一致，符合预期。'
+    }
+    return '已获取安装环境探测值，可直接作为字段最终展示值。'
+  }
+  if (item.check_name === 'standby_oracle_base_consistency') {
+    const detectedValue = structured.evidence?.detected_oracle_base?.toString().trim()
+    const inputValue = structured.evidence?.configured_oracle_base?.toString().trim()
+    const exists = structured.evidence?.exists
+    const matches = structured.evidence?.matches
+    const summaryText = structured.summary?.trim()
+    if (!detectedValue && summaryText) {
+      if (summaryText.includes('不一致')) {
+        return '自动探测与用户输入不一致，最终展示值仍应使用安装环境探测值。'
+      }
+      if (summaryText.includes('一致')) {
+        return '自动探测与用户输入一致，符合预期。'
+      }
+      if (summaryText.includes('探测失败') || summaryText.includes('未获取')) {
+        return '当前未能形成有效的安装环境探测值，字段应标记为探测失败。'
+      }
+      return '已获取安装环境探测值，可直接作为字段最终展示值。'
+    }
+    if (!detectedValue) {
+      return '当前未能形成有效的安装环境探测值，字段应标记为探测失败。'
+    }
+    if (inputValue && matches === false) {
+      return '自动探测与用户输入不一致，最终展示值仍应使用安装环境探测值。'
+    }
+    if (exists === false) {
+      return '已获取安装环境探测值，但该路径不存在，请先核对备库安装环境。'
+    }
+    if (inputValue) {
+      return '自动探测与用户输入一致，符合预期。'
+    }
+    return '已获取安装环境探测值，可直接作为字段最终展示值。'
+  }
+  if (item.check_name === 'version_compatibility') {
+    const classification = structured.evidence?.classification
+    if (classification === 'exact_match') {
+      return '主备版本可兼容，当前展示值与来源标签一致。'
+    }
+    if (classification === 'minor_diff') {
+      return '主备版本仍可继续，但建议尽量保持一致以降低兼容性风险。'
+    }
+  }
+  if (item.check_name === 'standby_db_unique_name_uniqueness') {
+    const primaryUniqueName = structured.evidence?.primary_unique_name?.toString().trim()
+    const standbyUniqueName = structured.evidence?.standby_unique_name?.toString().trim()
+    if (primaryUniqueName && standbyUniqueName && primaryUniqueName.toUpperCase() === standbyUniqueName.toUpperCase()) {
+      return '备库 DB_UNIQUE_NAME 与主库重复，这是阻断项，必须修改后才能继续。'
+    }
+    return '备库 DB_UNIQUE_NAME 与主库不重复，满足创建备库前的唯一性要求。'
+  }
+  if (item.check_name === 'primary_service_name_consistency') {
+    const detectedServices = Array.isArray(structured.evidence?.detected_services) ? structured.evidence?.detected_services : []
+    const expected = structured.evidence?.expected?.toString().trim()
+    if (!detectedServices.length) {
+      return '当前未获取到主库活跃服务列表，需人工核对 SERVICE_NAME。'
+    }
+    if (expected && detectedServices.some((service: string) => service.toLowerCase().includes(expected.toLowerCase()))) {
+      return '用户输入的 SERVICE_NAME 已被主库活跃服务列表包含，当前检查通过。'
+    }
+    return '用户输入的 SERVICE_NAME 未被主库活跃服务列表包含，请核对服务注册或输入值。'
+  }
+  if (item.check_name === 'primary_storage_type_consistency') {
+    const declared = structured.evidence?.declared_storage_type?.toString().trim()
+    const detected = structured.evidence?.detected_storage_type?.toString().trim()
+    if (!detected) {
+      return '当前未能从主库数据文件路径判定存储类型，字段继续保留当前展示值并提示人工核对。'
+    }
+    if (declared && detected && declared.toLowerCase() !== detected.toLowerCase()) {
+      return `用户输入的存储类型为 ${declared.toUpperCase()}，但数据文件路径判定结果为 ${detected.toUpperCase()}；字段继续展示用户输入并给出风险提示。`
+    }
+    return `主库存储类型与数据文件路径判定结果一致，当前按 ${detected.toUpperCase()} 展示。`
+  }
+  if (item.check_name === 'primary_is_cdb_consistency') {
+    const declared = structured.evidence?.declared_is_cdb
+    const actual = structured.evidence?.actual_is_cdb
+    if (typeof declared === 'boolean' && typeof actual === 'boolean' && declared !== actual) {
+      return `用户输入为${declared ? 'CDB' : '非 CDB'}，数据库实际探测为${actual ? 'CDB' : '非 CDB'}；字段继续展示用户输入并提示人工核对。`
+    }
+    if (typeof actual === 'boolean') {
+      return `用户输入与数据库实际探测一致，主库当前为${actual ? 'CDB' : '非 CDB'}。`
+    }
+    return '当前未返回可用的 CDB 探测结果，请人工核对主库是否为 CDB。'
+  }
+  if (
+    item.check_name === 'standby_data_dir_status'
+    || item.check_name === 'standby_log_dir_status'
+    || item.check_name === 'standby_archive_dir_status'
+  ) {
+    const statusFlag = structured.evidence?.status
+    const writable = structured.evidence?.writable
+    const hasFiles = structured.evidence?.has_files
+    const diskUsage = structured.evidence?.disk_usage_percent
+    if (statusFlag === 'not_exists') {
+      return '目录不存在，这是阻断项，需先创建目录并授权 oracle 用户。'
+    }
+    if (writable === false) {
+      return '目录已存在但当前无写权限，属于风险项，继续前请先核对权限或挂载状态。'
+    }
+    if (hasFiles) {
+      return '目录已存在文件，存在覆盖风险，继续前请先确认目录内容。'
+    }
+    if (typeof diskUsage === 'number' && diskUsage >= 85) {
+      return `目录空间使用率为 ${diskUsage}%，已进入高使用率区间，建议先确认剩余容量。`
+    }
+    return '目录存在、可写、无已有文件且空间使用率正常，当前检查通过。'
+  }
+  if (item.check_name === 'standby_adump_dir_status') {
+    const trustworthy = structured.evidence?.derive_trustworthy
+    const statusFlag = structured.evidence?.status
+    const writable = structured.evidence?.writable
+    const hasFiles = structured.evidence?.has_files
+    const diskUsage = structured.evidence?.disk_usage_percent
+    if (trustworthy === false || !structured.evidence?.path) {
+      return '当前未能形成可信的 adump 推导路径，属于风险项，请先确认 ORACLE_BASE 和 DB_UNIQUE_NAME。'
+    }
+    if (statusFlag === 'not_exists') {
+      return 'adump 推导成功，但目录不存在，这是阻断项，需先创建目录后再继续。'
+    }
+    if (writable === false) {
+      return 'adump 推导成功，但目录不可写，属于风险项，继续前请先核对权限或挂载状态。'
+    }
+    if (hasFiles) {
+      return 'adump 推导成功，目录已存在文件，存在复用风险，继续前请先确认目录内容。'
+    }
+    if (typeof diskUsage === 'number' && diskUsage >= 85) {
+      return `adump 推导成功，但目录空间使用率为 ${diskUsage}%，已进入高使用率区间，建议先确认剩余容量。`
+    }
+    return 'adump 推导成功，目录存在、可写且空间使用率正常，当前检查通过。'
+  }
+  if (item.check_name === 'standby_listener_status' || item.check_name === 'primary_listener_status') {
+    const expectedPort = structured.evidence?.expected_port
+    const running = structured.evidence?.running
+    const label = item.check_name === 'primary_listener_status' ? '主库' : '备库'
+    const portText = expectedPort ? `端口 ${expectedPort}` : '所填端口'
+    if (running) {
+      return `${label}监听 ${portText} 已运行，当前检查通过。`
+    }
+    return `${label}监听 ${portText} 未运行，请启动监听进程并检查 listener.ora 配置。`
+  }
+  if (item.check_name === 'primary_listener_port_validation' || item.check_name === 'standby_listener_port_validation') {
+    const expectedPort = structured.evidence?.expected_port
+    const detectedPorts = Array.isArray(structured.evidence?.detected_ports) ? structured.evidence?.detected_ports : []
+    const hasExpectedPort = structured.evidence?.has_expected_port
+    const label = item.check_name === 'primary_listener_port_validation' ? '主库' : '备库'
+    if (hasExpectedPort) {
+      return `${label}监听端口已包含用户输入端口 ${expectedPort ?? '未知'}，当前检查通过。`
+    }
+    return `${label}监听端口未包含用户输入端口 ${expectedPort ?? '未知'}；当前探测到的端口为 ${detectedPorts.length ? detectedPorts.join('、') : '未探测到'}。`
+  }
+  if (item.suggestion) {
+    return toSentence(item.suggestion)
+  }
+  if (item.result === 'pass') {
+    return '当前检查结果符合预期，可继续下一步。'
+  }
+  return '当前检查未返回更多结构化原因，请结合环境实际情况继续核对。'
+}
+
+const getPrecheckBlockingText = (item: PrecheckResult): string => (item.blocking ? '是' : '否')
+
+const renderDetectedValueIcon = (tooltipText?: string | null) => {
+  if (!tooltipText) {
+    return null
+  }
+  return (
+    <Tooltip title={tooltipText}>
+      <ExclamationCircleFilled style={{ color: 'var(--orange)', fontSize: 14 }} />
+    </Tooltip>
+  )
+}
+
+const formatPrecheckNames = (checkNames: string[]): string[] =>
+  checkNames.map((checkName) => PRECHECK_DISPLAY_META[checkName]?.title || checkName)
+
+const getStandbyVersionSource = (info?: DiscoveryInfo): FieldValueSource => {
+  const explicitSource = info?.network?.standby_version_source
+  if (explicitSource === 'inherit_primary') {
+    return 'inherit_primary'
+  }
+  if (explicitSource === 'auto_success') {
+    return 'auto_success'
+  }
+  if (explicitSource === 'auto_failed') {
+    return 'auto_failed'
+  }
+
+  const standbyVersion = info?.standby_oracle?.version || info?.standby_oracle?.sqlplus_version
+  if (!standbyVersion) {
+    return 'auto_failed'
+  }
+  return 'auto_success'
+}
+
+const getStandbyVersionSourceLabel = (info?: DiscoveryInfo): string => {
+  const source = getStandbyVersionSource(info)
+  return VALUE_SOURCE_TAGS[source]?.label || VALUE_SOURCE_TAGS.auto_failed.label
+}
+
+const buildFallbackVersionPrecheck = (item: PrecheckResult, info?: DiscoveryInfo): StructuredPrecheck => {
+  const structured = item as StructuredPrecheck
+  if (structured.detected_result && structured.summary && structured.related_fields?.length) {
+    return structured
+  }
+  const primaryVersion = structured.evidence?.primary_version || info?.primary_oracle?.version || info?.primary_oracle?.sqlplus_version || '未知'
+  const standbyVersion = structured.evidence?.standby_version || info?.standby_oracle?.version || info?.standby_oracle?.sqlplus_version || '未知'
+  const classification = structured.evidence?.classification
+    || (!primaryVersion || !standbyVersion || primaryVersion === '未知' || standbyVersion === '未知'
+      ? 'incomplete'
+      : (primaryVersion === standbyVersion ? 'exact_match' : (structured.result === 'warn' ? 'minor_diff' : 'major_diff')))
+  const sourceLabel = getStandbyVersionSourceLabel(info)
+  let summary = structured.summary
+  if (!summary) {
+    if (classification === 'exact_match') {
+      summary = `主备版本一致；备库版本来源为${sourceLabel}。`
+    } else if (classification === 'minor_diff') {
+      summary = `主备版本存在小差异；备库版本来源为${sourceLabel}，建议尽量保持一致。`
+    } else if (classification === 'incomplete') {
+      summary = `版本信息不完整；备库版本来源为${sourceLabel}。`
+    } else {
+      summary = `主备版本差异较大；备库版本来源为${sourceLabel}。`
+    }
+  }
+  return {
+    ...structured,
+    evidence: {
+      ...(structured.evidence || {}),
+      primary_version: primaryVersion,
+      standby_version: standbyVersion,
+      classification,
+    },
+    title: structured.title || '主备版本兼容性检查',
+    description: structured.description || '确认备库 Oracle 版本来自安装环境探测或主库继承，并评估主备版本差异是否可接受。',
+    detected_result: structured.detected_result || `主库版本 ${primaryVersion} / 备库版本 ${standbyVersion} / 备库来源 ${sourceLabel}`,
+    summary,
+    scope: structured.scope || '搭建环境',
+    related_fields: structured.related_fields?.length ? structured.related_fields : ['primaryVersion', 'standbyVersion', 'primaryOracleHome', 'standbyOracleHome'],
+  }
+}
+
+const buildFallbackStandbyOracleBasePrecheck = (
+  info: DiscoveryInfo | undefined,
+  values: SetupFormData,
+): StructuredPrecheck | null => {
+  const detectedBase = info?.standby_oracle?.oracle_base?.trim()
+  const configuredBase = values.standbyOracleBase?.trim()
+  if (!detectedBase && !configuredBase && !info) {
+    return null
+  }
+
+  if (!detectedBase) {
+    return {
+      check_name: 'standby_oracle_base_consistency',
+      category: 'configuration',
+      result: 'warn',
+      message: '备库 ORACLE_BASE 一致性',
+      suggestion: '未获取到备库 ORACLE_BASE，请检查备库安装环境或 profile 配置',
+      blocking: false,
+      risk_level: 'medium',
+      target: 'standby_oracle_base',
+      title: '备库 ORACLE_BASE 一致性检查',
+      description: '确认备库 ORACLE_BASE 的最终展示值只来自安装环境探测，并校验该路径是否可信。',
+      detected_result: '未从备库安装环境探测到 ORACLE_BASE。',
+      summary: '未获取到备库安装环境 ORACLE_BASE，字段最终展示值应标记为探测失败。',
+      scope: '备库环境',
+      related_fields: ['standbyOracleBase'],
+    }
+  }
+
+  const mismatch = Boolean(configuredBase && configuredBase !== detectedBase)
+  return {
+    check_name: 'standby_oracle_base_consistency',
+    category: 'configuration',
+    result: mismatch ? 'warn' : 'pass',
+    message: '备库 ORACLE_BASE 一致性',
+    suggestion: mismatch ? '备库 ORACLE_BASE 与安装环境不一致，请核对；最终展示值仍应使用探测值' : undefined,
+    blocking: false,
+    risk_level: mismatch ? 'medium' : 'low',
+    target: 'standby_oracle_base',
+    title: '备库 ORACLE_BASE 一致性检查',
+    description: '确认备库 ORACLE_BASE 的最终展示值只来自安装环境探测，并校验探测值与安装环境是否一致。',
+    detected_result: `安装环境探测到 ORACLE_BASE 为：${detectedBase}`,
+    summary: mismatch
+      ? '自动探测值与用户输入不一致，请以安装环境探测结果为准。'
+      : configuredBase
+        ? '自动探测值与用户输入一致，安装环境校验通过。'
+        : '探测路径存在，安装环境校验通过。',
+    scope: '备库环境',
+    related_fields: ['standbyOracleBase'],
+  }
+}
+
+const normalizePreviewData = (data: PreviewResponse, values: SetupFormData): PreviewResponse => {
+  const info = data.discovered_info
+  const normalizedResults = data.precheck_results.map((item) => {
+    if (item.check_name === 'version_compatibility') {
+      return buildFallbackVersionPrecheck(item, info)
+    }
+    return item
+  }) as PrecheckResult[]
+
+  const hasStandbyOracleBaseCheck = normalizedResults.some((item) => item.check_name === 'standby_oracle_base_consistency')
+  const fallbackStandbyOracleBaseCheck = hasStandbyOracleBaseCheck
+    ? null
+    : buildFallbackStandbyOracleBasePrecheck(info, values)
+
+  const finalResults = fallbackStandbyOracleBaseCheck
+    ? [...normalizedResults, fallbackStandbyOracleBaseCheck]
+    : normalizedResults
+
+  const buildDirectoryMetaFromLegacyStorage = (
+    path: string | undefined,
+    statusKey: string,
+    writableKey: string,
+    hasFilesKey: string,
+    rawUsageKey: string,
+    percentKey: string,
+  ) => {
+    const status = info.storage?.[statusKey]
+    const writable = info.storage?.[writableKey]
+    const hasFiles = info.storage?.[hasFilesKey]
+    const rawUsage = info.storage?.[rawUsageKey]
+    const percent = info.storage?.[percentKey]
+    if (!path && isNil(status) && isNil(writable) && isNil(hasFiles) && isNil(rawUsage) && isNil(percent)) {
+      return undefined
+    }
+    return {
+      input_path: path,
+      exists: typeof status === 'string' ? status !== 'not_exists' : undefined,
+      status,
+      writable,
+      has_files: hasFiles,
+      disk_usage: rawUsage || !isNil(percent)
+        ? {
+          raw: rawUsage,
+          percent: typeof percent === 'number' ? percent : undefined,
+        }
+        : undefined,
+    }
+  }
+
+  const buildDirectoryMetaFromPrecheck = (checkName: string) => {
+    const result = finalResults.find((item) => item.check_name === checkName)
+    const evidence = result?.evidence as Record<string, any> | undefined
+    if (!evidence?.path && isNil(evidence?.status)) {
+      return undefined
+    }
+    return {
+      input_path: evidence?.path,
+      exists: evidence?.exists,
+      status: evidence?.status,
+      writable: evidence?.writable,
+      has_files: evidence?.has_files,
+      disk_usage: {
+        percent: typeof evidence?.disk_usage_percent === 'number' ? evidence.disk_usage_percent : undefined,
+      },
+    }
+  }
+
+  const normalizedStorage = { ...(info.storage || {}) } as Record<string, any>
+  normalizedStorage.primary_data = normalizedStorage.primary_data || buildDirectoryMetaFromLegacyStorage(
+    values.primaryDataFilePath,
+    'primary_data_dir_status',
+    'primary_data_dir_writable',
+    'primary_data_dir_has_files',
+    'primary_disk_usage',
+    'primary_disk_usage_percent',
+  )
+  normalizedStorage.primary_log = normalizedStorage.primary_log || buildDirectoryMetaFromLegacyStorage(
+    values.primaryRedoFilePath,
+    'primary_log_dir_status',
+    'primary_log_dir_writable',
+    'primary_log_dir_has_files',
+    'primary_log_disk_usage',
+    'primary_log_disk_usage_percent',
+  )
+  normalizedStorage.standby_data = normalizedStorage.standby_data || buildDirectoryMetaFromPrecheck('standby_data_dir_status')
+  normalizedStorage.standby_log = normalizedStorage.standby_log || buildDirectoryMetaFromPrecheck('standby_log_dir_status')
+  normalizedStorage.standby_archive = normalizedStorage.standby_archive || buildDirectoryMetaFromPrecheck('standby_archive_dir_status')
+  normalizedStorage.standby_adump = normalizedStorage.standby_adump || buildDirectoryMetaFromPrecheck('standby_adump_dir_status')
+
+  const passed = finalResults.filter((item) => item.result === 'pass').length
+  const warned = finalResults.filter((item) => item.result === 'warn').length
+  const failed = finalResults.filter((item) => item.result === 'fail').length
+  const blockingIssues = finalResults.filter((item) => item.blocking).map((item) => item.check_name)
+
+  return {
+    ...data,
+    discovered_info: {
+      ...data.discovered_info,
+      storage: normalizedStorage,
+    },
+    precheck_results: finalResults,
+    risk_summary: {
+      ...data.risk_summary,
+      total_checks: finalResults.length,
+      passed,
+      warned,
+      failed,
+      blocking_issues: blockingIssues,
+    },
+  }
+}
 
 const getDiscoveryValue = (info: DiscoveryInfo | undefined, path: string[]): any => {
   if (!info || !path.length) return undefined
@@ -697,7 +1587,7 @@ const buildPreviewPayload = (values: SetupFormData) => {
     primary_oracle_base: values.primaryOracleBase,
     primary_db_unique_name: normalizedPrimaryUniqueName,
     primary_listener_port: values.primaryListenerPort,
-    primary_service_name: values.primaryServiceName || sharedDbName,
+    primary_service_name: values.primaryServiceName?.trim() || undefined,
     primary_storage_type: values.primaryStorageType,
     primary_is_cdb: values.primaryIsCdb,
     standby_sid: values.standbySid,
@@ -705,7 +1595,7 @@ const buildPreviewPayload = (values: SetupFormData) => {
     standby_oracle_base: values.standbyOracleBase,
     standby_db_unique_name: normalizedStandbyUniqueName,
     standby_listener_port: values.standbyListenerPort,
-    standby_service_name: values.standbyServiceName || sharedDbName,
+    standby_service_name: values.standbyServiceName?.trim() || undefined,
     standby_storage_type: values.standbyStorageType,
     standby_is_cdb: values.standbyIsCdb,
   }
@@ -759,7 +1649,7 @@ const buildClusterPayload = (values: SetupFormData) => {
       sys_password: values.primarySysPassword,
       db_unique_name: values.primaryDbUniqueName,
       listener_port: values.primaryListenerPort,
-      service_name: values.primaryServiceName || sharedDbName,
+      service_name: values.primaryServiceName?.trim() || undefined,
       storage_type: values.primaryStorageType,
       is_cdb: values.primaryIsCdb,
     },
@@ -827,7 +1717,7 @@ const buildSetupPayload = (values: SetupFormData) => {
     'primary.oracle_base': values.primaryOracleBase,
     'primary.db_unique_name': values.primaryDbUniqueName,
     'primary.sys_password': values.primarySysPassword,
-    'primary.service_name': values.primaryServiceName || sharedDbName,
+    'primary.service_name': values.primaryServiceName?.trim() || undefined,
     'primary.listener_port': values.primaryListenerPort,
     'primary.storage_type': values.primaryStorageType,
     'primary.is_cdb': values.primaryIsCdb,
@@ -1126,18 +2016,24 @@ function SetupWizard() {
       title: '检查项',
       dataIndex: 'check_name',
       key: 'check_name',
-      render: (text: string, record) => (
+      render: (_text: string, record) => {
+        const meta = getPrecheckDisplayMeta(record)
+        return (
         <Space size={6}>
           {record.blocking && <WarningOutlined style={{ color: 'var(--red)' }} />}
-          <span style={{ color: record.blocking ? 'var(--red)' : 'var(--text)', fontWeight: record.blocking ? 600 : 500 }}>{text}</span>
+          <span style={{ color: record.blocking ? 'var(--red)' : 'var(--text)', fontWeight: record.blocking ? 600 : 500 }}>{meta.title}</span>
         </Space>
-      ),
+        )
+      },
     },
     {
-      title: '类别',
-      dataIndex: 'category',
-      key: 'category',
-      render: (value: string) => <Tag style={{ borderColor: 'var(--border)', color: 'var(--text2)', margin: 0 }}>{value || '-'}</Tag>,
+      title: '影响范围',
+      dataIndex: 'target',
+      key: 'target',
+      render: (_value: string, record) => {
+        const meta = getPrecheckDisplayMeta(record)
+        return <Tag style={{ borderColor: 'var(--border)', color: 'var(--text2)', margin: 0 }}>{meta.scope}</Tag>
+      },
     },
     {
       title: '结果',
@@ -1156,17 +2052,18 @@ function SetupWizard() {
       ),
     },
     {
-      title: '消息',
-      dataIndex: 'message',
-      key: 'message',
+      title: '说明',
+      dataIndex: 'check_name',
+      key: 'description',
       ellipsis: true,
+      render: (_value: string, record) => getPrecheckDisplayMeta(record).description,
     },
     {
-      title: '建议',
+      title: '最终结果',
       dataIndex: 'suggestion',
-      key: 'suggestion',
+      key: 'final_result',
       ellipsis: true,
-      render: (value: string) => value || '-',
+      render: (_value: string, record) => getPrecheckFinalResultText(record),
     },
   ], [])
 
@@ -1292,7 +2189,7 @@ function SetupWizard() {
       if (!data) {
         throw new Error('未获取到预览结果')
       }
-      setPreviewData(data)
+      setPreviewData(normalizePreviewData(data, values))
       resetFieldOverrideState()
       if (data.is_demo) {
         message.info({
@@ -1375,7 +2272,7 @@ function SetupWizard() {
       if (!data) {
         throw new Error('未获取到预览结果')
       }
-      setPreviewData(data)
+      setPreviewData(normalizePreviewData(data, values))
       if (data.is_demo) {
         message.info({
           content: '演示数据：本次未连接真实主机',
@@ -1487,6 +2384,142 @@ function SetupWizard() {
     const isServiceField = pathLeaf === 'service_name'
     const isPrimaryServiceField = isServiceField && config.role === 'primary'
     const isStandbyServiceField = isServiceField && config.role === 'standby'
+    const standbyServiceSource = previewData?.discovered_info?.network?.standby_service_name_source
+    const storageMeta = previewData?.discovered_info?.storage as Record<string, any> | undefined
+    const primaryDbUniqueNameCheck = previewData?.precheck_results?.find((item) => item.check_name === 'primary_db_unique_name_consistency')
+    const detectedPrimaryDbUniqueName = primaryDbUniqueNameCheck?.evidence?.actual_db_unique_name?.toString().trim()
+
+    if (fieldKey === 'primary_storage_type') {
+      const detectedStorage = storageMeta?.primary_storage_detected_type
+      if (!isNil(formValue)) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: detectedStorage,
+        }
+      }
+      if (!isNil(detectedStorage)) {
+        return {
+          value: detectedStorage,
+          source: 'auto_success',
+          originalValue: detectedStorage,
+        }
+      }
+      return {
+        value: discoveryValue,
+        source: previewReady ? 'auto_failed' : 'planned',
+        originalValue: detectedStorage,
+      }
+    }
+
+    if (fieldKey === 'primary_is_cdb') {
+      const detectedIsCdb = previewData?.discovered_info?.primary_db?.is_cdb
+      if (!isNil(formValue)) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: detectedIsCdb,
+        }
+      }
+      if (!isNil(detectedIsCdb)) {
+        return {
+          value: detectedIsCdb,
+          source: 'auto_success',
+          originalValue: detectedIsCdb,
+        }
+      }
+      return {
+        value: discoveryValue,
+        source: previewReady ? 'auto_failed' : 'planned',
+        originalValue: detectedIsCdb,
+      }
+    }
+
+    if (fieldKey === 'primary_db_unique_name') {
+      if (!isNil(formValue)) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: detectedPrimaryDbUniqueName || discoveryValue,
+        }
+      }
+      if (detectedPrimaryDbUniqueName) {
+        return {
+          value: detectedPrimaryDbUniqueName,
+          source: 'auto_success',
+          originalValue: detectedPrimaryDbUniqueName,
+        }
+      }
+    }
+
+    if (fieldKey === 'standby_storage_type') {
+      const standbyStorageSource = storageMeta?.standby_storage_source
+      if (standbyStorageSource === 'inherit_primary' && !isNil(discoveryValue)) {
+        return {
+          value: discoveryValue,
+          source: 'inherit_primary',
+          originalValue: undefined,
+        }
+      }
+      if (standbyStorageSource === 'planned' && !isNil(discoveryValue)) {
+        return {
+          value: discoveryValue,
+          source: 'planned',
+          originalValue: undefined,
+        }
+      }
+      if (!isNil(formValue)) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: undefined,
+        }
+      }
+      return {
+        value: discoveryValue,
+        source: previewReady ? 'auto_failed' : 'planned',
+        originalValue: undefined,
+      }
+    }
+
+    if (fieldKey === 'standby_is_cdb') {
+      const standbyIsCdbSource = previewData?.discovered_info?.network?.standby_is_cdb_source
+      if (standbyIsCdbSource === 'inherit_primary' && !isNil(discoveryValue)) {
+        return {
+          value: discoveryValue,
+          source: 'inherit_primary',
+          originalValue: undefined,
+        }
+      }
+      if (standbyIsCdbSource === 'planned' && !isNil(discoveryValue)) {
+        return {
+          value: discoveryValue,
+          source: 'planned',
+          originalValue: undefined,
+        }
+      }
+      if (!isNil(formValue)) {
+        return {
+          value: formValue,
+          source: 'user_input',
+          originalValue: undefined,
+        }
+      }
+      return {
+        value: discoveryValue,
+        source: previewReady ? 'auto_failed' : 'planned',
+        originalValue: undefined,
+      }
+    }
+
+    // 用户输入直显类：第 1 步必填字段无条件返回 user_input
+    if (USER_INPUT_REQUIRED_FIELDS.has(config.formField)) {
+      return {
+        value: formValue,
+        source: 'user_input',
+        originalValue: discoveryValue,
+      }
+    }
 
     if (overrideInfo) {
       return {
@@ -1519,7 +2552,7 @@ function SetupWizard() {
         : discoveryValue
       return {
         value: planned,
-        source: previewReady ? 'planned' : 'planned',
+        source: isStandbyServiceField && standbyServiceSource === 'user_input' ? 'user_input' : 'planned',
         originalValue: discoveryValue,
       }
     }
@@ -1553,16 +2586,6 @@ function SetupWizard() {
             primaryValue = primaryFormValue
           }
         }
-        if (!isNil(value) && !isNil(primaryValue)) {
-          const valuesMatch = typeof value === 'string' && typeof primaryValue === 'string'
-            ? value.trim() === primaryValue.trim()
-            : Object.is(value, primaryValue)
-          if (valuesMatch) {
-            if (fieldKey === 'standby_storage_type' || fieldKey === 'standby_is_cdb') {
-              source = 'inherit_primary'
-            }
-          }
-        }
         if (isStandbyServiceField && !hasDiscoveryValue && !hasFormValue) {
           value = form.getFieldValue('standbyDbUniqueName')
           source = 'planned'
@@ -1571,7 +2594,7 @@ function SetupWizard() {
     }
 
     if (isStandbyServiceField && source === 'auto_success') {
-      source = 'planned'
+      source = standbyServiceSource === 'user_input' ? 'user_input' : 'planned'
     }
 
     return {
@@ -1579,12 +2602,6 @@ function SetupWizard() {
       source,
       originalValue: discoveryValue,
     }
-  }
-
-  const normalizeConnectivityStatus = (raw?: any): StatusTagType => {
-    if (!raw) return 'unknown'
-    const keys = Object.keys(DISCOVERY_STATUS_META) as StatusTagType[]
-    return keys.includes(raw as StatusTagType) ? raw as StatusTagType : 'unknown'
   }
 
   const mapPathStatusToStatus = (pathStatus?: string): StatusTagType | undefined => {
@@ -1599,18 +2616,9 @@ function SetupWizard() {
     if (!baseSource) return undefined
     if (baseSource !== 'auto_success') return baseSource
     if (!status) return 'auto_success'
-    if (status === 'failed' || status === 'unknown') return 'auto_failed'
+    if (status === 'failed') return 'auto_failed'
     if (status === 'warning' || status === 'timeout' || status === 'partial') return 'auto_failed'
     return 'auto_success'
-  }
-
-  const renderStatusTag = (status: StatusTagType) => {
-    const meta = DISCOVERY_STATUS_META[status]
-    return (
-      <Tag style={{ borderColor: meta.color, color: meta.color, margin: 0 }}>
-        {meta.label}
-      </Tag>
-    )
   }
 
   const renderFieldValueRow = ({
@@ -1620,14 +2628,19 @@ function SetupWizard() {
     status,
     editableKey,
     extra,
-    rowKey,
-    customValue,
-  }: FieldValueRowProps) => {
-    const formattedValue = formatValue(value)
-    const displayValue = customValue ?? formattedValue
-    const computedKey = rowKey || `${label}-${editableKey ?? ''}`
-    const actualSource = mapStatusToSource(source, status)
-    return (
+  rowKey,
+  customValue,
+  sourceTagLabel,
+  sourceTagColor,
+  disableStatusSourceMapping,
+}: FieldValueRowProps) => {
+  const formattedValue = formatValue(value)
+  const displayValue = customValue ?? formattedValue
+  const computedKey = rowKey || `${label}-${editableKey ?? ''}`
+  const actualSource = disableStatusSourceMapping ? source : mapStatusToSource(source, status)
+  const tagLabel = sourceTagLabel || (actualSource ? VALUE_SOURCE_TAGS[actualSource].label : undefined)
+  const tagColor = sourceTagColor || (actualSource ? VALUE_SOURCE_TAGS[actualSource].color : undefined)
+  return (
       <div key={computedKey} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
         <div
@@ -1641,12 +2654,11 @@ function SetupWizard() {
         >
           <Space size={4} wrap align="center">
             <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>{displayValue}</span>
-            {actualSource && (
-              <Tag style={{ borderColor: VALUE_SOURCE_TAGS[actualSource].color, color: VALUE_SOURCE_TAGS[actualSource].color, margin: 0 }}>
-                {VALUE_SOURCE_TAGS[actualSource].label}
+            {tagLabel && tagColor && (
+              <Tag style={{ borderColor: tagColor, color: tagColor, margin: 0 }}>
+                {tagLabel}
               </Tag>
             )}
-            {status && renderStatusTag(status)}
             {extra}
           </Space>
           {editableKey && (
@@ -1669,16 +2681,21 @@ function SetupWizard() {
     const config = FIELD_OVERRIDE_CONFIG[fieldKey]
     const meta = getFieldDisplayMeta(fieldKey)
     const overrideInfo = fieldOverrides[fieldKey]
-    const shouldShowOriginal = !isNil(meta.originalValue) && (!overrideInfo || meta.source === 'user_input')
-    const extra = overrideInfo ? (
-      <Tooltip title={`自动探测值: ${formatValue(overrideInfo.originalValue)}`}>
-        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
-      </Tooltip>
-    ) : shouldShowOriginal && meta.source === 'user_input' ? (
-      <Tooltip title={`自动探测值: ${formatValue(meta.originalValue)}`}>
-        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
-      </Tooltip>
-    ) : null
+    if (fieldKey === 'standby_service_name') {
+      return renderFieldValueRow({
+        rowKey: fieldKey,
+        label: config.label,
+        value: meta.value,
+        source: meta.source,
+      })
+    }
+    const suppressDetectedIcon = fieldKey === 'standby_db_unique_name'
+    const shouldShowOriginal = !suppressDetectedIcon && !isNil(meta.originalValue) && (!overrideInfo || meta.source === 'user_input')
+    const extra = overrideInfo
+      ? (suppressDetectedIcon ? null : renderDetectedValueIcon(`自动探测值: ${formatValue(overrideInfo.originalValue)}`))
+      : shouldShowOriginal && meta.source === 'user_input'
+        ? renderDetectedValueIcon(`自动探测值: ${formatValue(meta.originalValue)}`)
+        : null
     return renderFieldValueRow({
       rowKey: fieldKey,
       label: config.label,
@@ -1720,6 +2737,21 @@ function SetupWizard() {
         discovered_info: setDiscoveryValue(prev.discovered_info, config.path, overrideValue),
       }
     })
+  }
+
+  const getGroupStatus = (checkNames: string[]): 'pass' | 'warn' | 'fail' | undefined => {
+    const relatedChecks = previewData?.precheck_results?.filter((p) => checkNames.includes(p.check_name))
+    if (!relatedChecks?.length) return undefined
+    const hasFail = relatedChecks.some((p) => p.result === 'fail')
+    const hasWarn = relatedChecks.some((p) => p.result === 'warn')
+    return hasFail ? 'fail' : (hasWarn ? 'warn' : 'pass')
+  }
+
+  const renderGroupStatusDot = (status: 'pass' | 'warn' | 'fail' | undefined) => {
+    if (status === 'pass') return <CheckCircleFilled style={{ color: 'var(--green)', fontSize: 16 }} />
+    if (status === 'warn') return <ExclamationCircleFilled style={{ color: 'var(--yellow)', fontSize: 16 }} />
+    if (status === 'fail') return <CloseCircleFilled style={{ color: 'var(--red)', fontSize: 16 }} />
+    return null
   }
 
   const handleOverrideSave = async () => {
@@ -1800,9 +2832,7 @@ function SetupWizard() {
   const renderHostDiscoveryCard = (role: 'primary' | 'standby') => {
     const info = previewData?.discovered_info
     const hostInfo = role === 'primary' ? info?.primary_host : info?.standby_host
-    const status = normalizeConnectivityStatus(hostInfo?.status)
     const sshUser = role === 'primary' ? form.getFieldValue('primarySshUser') : form.getFieldValue('standbySshUser')
-    const sshPort = role === 'primary' ? form.getFieldValue('primaryPort') : form.getFieldValue('standbyPort')
     const hostInput = role === 'primary' ? form.getFieldValue('primaryHost') : form.getFieldValue('standbyHost')
     const hostLabel = role === 'primary' ? '主库主机' : '备库主机'
     const detectedIps: string[] = hostInfo?.detected_ips || []
@@ -1811,7 +2841,6 @@ function SetupWizard() {
         <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
       </Tooltip>
     ) : null
-    const osDisplay = hostInfo?.os_pretty_name || hostInfo?.os_name || hostInfo?.os_type || hostInfo?.os_version
     return (
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1819,7 +2848,6 @@ function SetupWizard() {
             <CloudServerOutlined style={{ color: role === 'primary' ? 'var(--primary)' : 'var(--green)' }} />
             <span style={{ color: 'var(--text)', fontWeight: 600 }}>{hostLabel}</span>
           </Space>
-          {renderStatusTag(status)}
         </div>
         {renderFieldValueRow({
           rowKey: `${role}-input-host`,
@@ -1835,16 +2863,10 @@ function SetupWizard() {
           source: hostInfo?.hostname ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
-          rowKey: `${role}-os`,
+          rowKey: `${role}-os-type`,
           label: '操作系统',
-          value: osDisplay,
-          source: osDisplay ? 'auto_success' : 'auto_failed',
-        })}
-        {renderFieldValueRow({
-          rowKey: `${role}-kernel`,
-          label: '内核版本',
-          value: hostInfo?.kernel,
-          source: hostInfo?.kernel ? 'auto_success' : 'auto_failed',
+          value: hostInfo?.os_type || hostInfo?.kernel_version,
+          source: (hostInfo?.os_type || hostInfo?.kernel_version) ? 'auto_success' : 'auto_failed',
         })}
         {renderFieldValueRow({
           rowKey: `${role}-ssh`,
@@ -1852,71 +2874,7 @@ function SetupWizard() {
           value: sshUser,
           source: 'user_input',
         })}
-        {renderFieldValueRow({
-          rowKey: `${role}-ssh-port`,
-          label: 'SSH 端口',
-          value: sshPort,
-          source: 'user_input',
-        })}
       </Space>
-    )
-  }
-
-  const mapInstanceStatusToTag = (status?: string): StatusTagType => {
-    if (!status) return 'unknown'
-    const normalized = status.toUpperCase()
-    if (normalized.includes('OPEN') || normalized.includes('READ WRITE')) {
-      return 'success'
-    }
-    if (normalized.includes('MOUNT') || normalized.includes('START')) {
-      return 'warning'
-    }
-    if (normalized.includes('DOWN') || normalized.includes('CLOSE')) {
-      return 'failed'
-    }
-    return 'partial'
-  }
-
-  const renderListenerValidationRow = (
-    role: 'primary' | 'standby',
-    validation?: Record<string, any>,
-    expectedPort?: number,
-  ) => {
-    if (!validation) {
-      return renderFieldValueRow({
-        rowKey: `${role}-listener-validation`,
-        label: '监听校验结果',
-        value: '未探测到',
-        source: previewData ? 'auto_failed' : 'planned',
-      })
-    }
-    const status = (validation.status as PrecheckResultStatus) || 'warn'
-    const detectedPorts: string = Array.isArray(validation.detected_ports) && validation.detected_ports.length
-      ? validation.detected_ports.join(', ')
-      : '未探测到'
-    return (
-      <div key={`${role}-listener-validation`} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <Text type="secondary" style={{ fontSize: 12 }}>监听校验结果</Text>
-        <Space size={6} wrap>
-          <Tag style={{ borderColor: RESULT_COLORS[status], color: RESULT_COLORS[status], margin: 0 }}>
-            {status.toUpperCase()}
-          </Tag>
-          <Text type="secondary">
-            期望 {expectedPort ?? '未填写'} / 探测 {detectedPorts}
-          </Text>
-          {typeof validation.sid_matched === 'boolean' && (
-            <Tag
-              style={{
-                margin: 0,
-                borderColor: validation.sid_matched ? 'var(--green)' : 'var(--orange)',
-                color: validation.sid_matched ? 'var(--green)' : 'var(--orange)',
-              }}
-            >
-              {validation.sid_matched ? 'SID 匹配' : 'SID 未匹配'}
-            </Tag>
-          )}
-        </Space>
-      </div>
     )
   }
 
@@ -1933,22 +2891,27 @@ function SetupWizard() {
     const oracleInfo = isPrimary ? info.primary_oracle : info.standby_oracle
     const storage = info.storage || {}
     const primaryDb = info.primary_db || {}
-    const oracleStatus = normalizeConnectivityStatus((oracleInfo as any)?.status)
     const overrideOrder = isPrimary ? PRIMARY_OVERRIDE_FIELD_ORDER : STANDBY_OVERRIDE_FIELD_ORDER
     const overrideCount = overrideOrder.filter((field) => fieldOverrides[field]).length
+    const versionValue = oracleInfo?.version || oracleInfo?.sqlplus_version
+    const versionSource: FieldValueSource = isPrimary
+      ? (info.network?.primary_version_source === 'auto_success' ? 'auto_success' : 'auto_failed')
+      : getStandbyVersionSource(info)
     const oracleBaseFormField: keyof SetupFormData = isPrimary ? 'primaryOracleBase' : 'standbyOracleBase'
     const oracleBaseFormValue = form.getFieldValue(oracleBaseFormField)
-    const oracleBaseValue = !isNil(oracleBaseFormValue) ? oracleBaseFormValue : oracleInfo?.oracle_base
-    const oracleBaseSource: FieldValueSource = !isNil(oracleBaseFormValue)
-      ? 'user_input'
+    const oracleBaseValue = isPrimary
+      ? (!isNil(oracleBaseFormValue) ? oracleBaseFormValue : oracleInfo?.oracle_base)
       : oracleInfo?.oracle_base
-        ? 'auto_success'
-        : 'auto_failed'
-    const oracleBaseExtra = oracleBaseSource === 'user_input' && oracleInfo?.oracle_base && oracleInfo.oracle_base !== oracleBaseFormValue ? (
-      <Tooltip title={`自动探测: ${oracleInfo.oracle_base}`}>
-        <InfoCircleOutlined style={{ color: 'var(--text2)' }} />
-      </Tooltip>
-    ) : null
+    const oracleBaseSource: FieldValueSource = isPrimary
+      ? (!isNil(oracleBaseFormValue) ? 'user_input' : (oracleInfo?.oracle_base ? 'auto_success' : 'auto_failed'))
+      : (oracleInfo?.oracle_base ? 'auto_success' : 'auto_failed')
+    const oracleBaseExtra = isPrimary
+      ? (oracleBaseSource === 'user_input' && oracleInfo?.oracle_base
+        ? renderDetectedValueIcon(`自动探测值: ${oracleInfo.oracle_base}`)
+        : null)
+      : (oracleBaseSource === 'auto_success'
+        ? renderDetectedValueIcon(`安装环境探测值: ${formatValue(oracleInfo?.oracle_base)}`)
+        : null)
     const sidFormField: keyof SetupFormData = isPrimary ? 'primarySid' : 'standbySid'
     const sidValue = form.getFieldValue(sidFormField)
     const sidDetected = oracleInfo?.oracle_sid
@@ -1959,8 +2922,8 @@ function SetupWizard() {
     ) : null
     const listenerPortField: keyof SetupFormData = isPrimary ? 'primaryListenerPort' : 'standbyListenerPort'
     const listenerPortValue = form.getFieldValue(listenerPortField)
-    const listenerSource: FieldValueSource = listenerPortValue ? 'user_input' : 'planned'
-    const listenerLabel = isPrimary ? '监听端口' : '监听端口（计划使用）'
+    const listenerSource: FieldValueSource = 'user_input'
+    const listenerLabel = '监听端口'
     const dataMeta = (isPrimary ? storage.primary_data : storage.standby_data) as Record<string, any> | undefined
     const logMeta = (isPrimary ? storage.primary_log : storage.standby_log) as Record<string, any> | undefined
     const primaryDataStrategyValue = form.getFieldValue('primaryDataFilePath')
@@ -1969,8 +2932,8 @@ function SetupWizard() {
     const standbyLogStrategyValue = form.getFieldValue('standbyRedoFilePath')
     const primaryDataPrefix = primaryDataStrategyValue || storage.primary_data_detected_prefix || storage.data_files_path
     const primaryLogPrefix = primaryLogStrategyValue || storage.primary_log_detected_prefix || storage.primary_redo_path
-    const standbyDataPrefix = standbyDataStrategyValue || storage.standby_data_files_path
-    const standbyLogPrefix = standbyLogStrategyValue || storage.standby_redo_path || standbyDataPrefix
+    const standbyDataPrefix = standbyDataStrategyValue || (storage.standby_data as Record<string, any> | undefined)?.input_path || storage.standby_data_files_path
+    const standbyLogPrefix = standbyLogStrategyValue || (storage.standby_log as Record<string, any> | undefined)?.input_path || storage.standby_redo_path
     const dataPrefix = isPrimary ? primaryDataPrefix : standbyDataPrefix
     const logPrefix = isPrimary ? primaryLogPrefix : standbyLogPrefix
     const primaryDataSource: FieldValueSource = primaryDataStrategyValue
@@ -1991,30 +2954,31 @@ function SetupWizard() {
           : previewData
             ? 'auto_failed'
             : 'planned'
-    const standbyDataSource: FieldValueSource = standbyDataStrategyValue
-      ? 'user_input'
-      : standbyDataPrefix
-        ? 'planned'
-        : previewData
-          ? 'auto_failed'
-          : 'planned'
-    const standbyLogSource: FieldValueSource = standbyLogStrategyValue
-      ? 'user_input'
-      : standbyLogPrefix
-        ? 'planned'
-        : previewData
-          ? 'auto_failed'
-          : 'planned'
+    const standbyDataSource: FieldValueSource = standbyDataPrefix ? 'user_input' : (previewData ? 'auto_failed' : 'planned')
+    const standbyLogSource: FieldValueSource = standbyLogPrefix ? 'user_input' : (previewData ? 'auto_failed' : 'planned')
     const dataPrefixSource: FieldValueSource = isPrimary ? primaryDataSource : standbyDataSource
     const logPrefixSource: FieldValueSource = isPrimary ? primaryLogSource : standbyLogSource
+    const primaryDataExtra = isPrimary && primaryDataStrategyValue && storage.primary_data_detected_prefix
+      ? renderDetectedValueIcon(`自动探测值: ${formatValue(storage.primary_data_detected_prefix)}`)
+      : null
+    const primaryLogExtra = isPrimary && primaryLogStrategyValue && storage.primary_log_detected_prefix
+      ? renderDetectedValueIcon(`自动探测值: ${formatValue(storage.primary_log_detected_prefix)}`)
+      : null
     const dataStatus = mapPathStatusToStatus(dataMeta?.status)
     const logStatus = mapPathStatusToStatus(logMeta?.status)
     const archiveMode = (primaryDb as any)?.archive_mode
     const forceLogging = (primaryDb as any)?.force_logging
-    const instanceStatus = isPrimary ? ((primaryDb as any)?.instance_status || oracleInfo?.instance_status) : null
+    const standbyVersionExtra = !isPrimary && versionSource === 'auto_success'
+      ? renderDetectedValueIcon(`自动探测值: ${formatValue(versionValue)}`)
+      : null
     return (
       <Card
-        title={`${isPrimary ? '主库' : '备库'}探测确认`}
+        title={
+          <Space align="center" size={8}>
+            <span>{`${isPrimary ? '主库' : '备库'}探测确认`}</span>
+            {renderGroupStatusDot(getGroupStatus(GROUP_CHECK_MAP[isPrimary ? 'primary-env' : 'standby-env']))}
+          </Space>
+        }
         style={cardStyle}
         headStyle={{ color: 'var(--text)' }}
         extra={overrideCount > 0 ? <Badge color="#fa8c16" text={`${overrideCount} 个字段已覆盖`} /> : null}
@@ -2025,13 +2989,13 @@ function SetupWizard() {
           <Space align="center" size={8}>
             <DatabaseOutlined style={{ color: 'var(--orange)' }} />
             <Text type="secondary">Oracle 环境</Text>
-            {renderStatusTag(oracleStatus)}
           </Space>
           {renderFieldValueRow({
             rowKey: `${role}-version`,
-            label: 'Oracle 版本',
-            value: oracleInfo?.version || oracleInfo?.sqlplus_version,
-            source: (oracleInfo?.version || oracleInfo?.sqlplus_version) ? 'auto_success' : 'auto_failed',
+            label: isPrimary ? 'Oracle 版本' : 'Oracle 版本',
+            value: versionValue,
+            source: versionSource,
+            extra: standbyVersionExtra,
           })}
           {renderOverrideFieldRow(isPrimary ? 'primary_oracle_home' : 'standby_oracle_home')}
           {renderFieldValueRow({
@@ -2048,15 +3012,6 @@ function SetupWizard() {
             source: 'user_input',
             extra: sidExtra,
           })}
-          {isPrimary && (
-            renderFieldValueRow({
-              rowKey: 'primary-instance-status',
-              label: '实例运行状态',
-              value: instanceStatus,
-              source: instanceStatus ? 'auto_success' : 'auto_failed',
-              status: mapInstanceStatusToTag(instanceStatus),
-            })
-          )}
           {renderOverrideFieldRow(isPrimary ? 'primary_service_name' : 'standby_service_name')}
           {renderFieldValueRow({
             rowKey: `${role}-listener-port`,
@@ -2064,13 +3019,13 @@ function SetupWizard() {
             value: listenerPortValue,
             source: listenerSource,
           })}
-          {renderListenerValidationRow(role, oracleInfo?.listener_validation, listenerPortValue)}
           {renderFieldValueRow({
             rowKey: `${role}-data-prefix`,
             label: `${isPrimary ? '主库' : '备库'}数据文件前缀`,
             value: dataPrefix,
             source: dataPrefixSource,
             status: dataStatus,
+            extra: primaryDataExtra,
           })}
           {renderFieldValueRow({
             rowKey: `${role}-log-prefix`,
@@ -2078,6 +3033,7 @@ function SetupWizard() {
             value: logPrefix,
             source: logPrefixSource,
             status: logStatus,
+            extra: primaryLogExtra,
           })}
           {renderOverrideFieldRow(isPrimary ? 'primary_db_unique_name' : 'standby_db_unique_name')}
           {renderOverrideFieldRow(isPrimary ? 'primary_storage_type' : 'standby_storage_type')}
@@ -2095,6 +3051,7 @@ function SetupWizard() {
             value: typeof forceLogging === 'boolean' ? (forceLogging ? '已开启' : '未开启') : undefined,
             source: typeof forceLogging === 'boolean' ? 'auto_success' : 'auto_failed',
             status: typeof forceLogging === 'boolean' ? (forceLogging ? 'success' : 'warning') : 'unknown',
+            disableStatusSourceMapping: true,
           })}
         </Space>
       </Card>
@@ -2113,9 +3070,28 @@ function SetupWizard() {
     meta: Record<string, any> | undefined,
     source: FieldValueSource,
     fallbackPath?: string,
+    options?: {
+      sourceTagLabel?: string
+      sourceTagColor?: string
+      tooltip?: ReactNode
+    },
   ) => {
     const pathValue = meta?.input_path || fallbackPath
     const status = mapPathStatusToStatus(meta?.status)
+    const existsValue = typeof meta?.exists === 'boolean'
+      ? meta.exists
+      : (meta?.status ? meta.status !== 'not_exists' : undefined)
+    const writableValue = typeof meta?.writable === 'boolean'
+      ? meta.writable
+      : (meta?.status === 'not_writable' ? false : undefined)
+    const statusLabel = !existsValue ? '目录不存在' : (!writableValue ? '目录不可写' : undefined)
+    const summaryTagLabel = statusLabel || options?.sourceTagLabel
+    const summaryTagColor = statusLabel ? 'var(--red)' : options?.sourceTagColor
+    const diskUsage = meta?.disk_usage as { size?: string; used?: string; available?: string; percent?: number; mount_point?: string; filesystem?: string } | undefined
+    const existsKnown = typeof existsValue === 'boolean'
+    const shouldShowOnlyMissingTag = existsValue === false
+    const writableKnown = typeof writableValue === 'boolean'
+    const hasFilesKnown = typeof meta?.has_files === 'boolean'
     return (
       <div key={key} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
         {renderFieldValueRow({
@@ -2124,21 +3100,38 @@ function SetupWizard() {
           value: pathValue,
           source,
           status,
+          sourceTagLabel: summaryTagLabel,
+          sourceTagColor: summaryTagColor,
+          extra: options?.tooltip,
+          disableStatusSourceMapping: Boolean(summaryTagLabel),
         })}
-        <Space size={6} wrap style={{ marginTop: 4 }}>
-          <Tag style={{ borderColor: resolveBoolColor(meta?.exists, 'var(--green)', 'var(--red)'), color: resolveBoolColor(meta?.exists, 'var(--green)', 'var(--red)'), margin: 0 }}>
-            存在: {formatBoolean(meta?.exists)}
-          </Tag>
-          <Tag style={{ borderColor: resolveBoolColor(meta?.writable, 'var(--green)', 'var(--orange)'), color: resolveBoolColor(meta?.writable, 'var(--green)', 'var(--orange)'), margin: 0 }}>
-            可写: {formatBoolean(meta?.writable, '是', '否')}
-          </Tag>
-          <Tag style={{ borderColor: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), color: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), margin: 0 }}>
-            已有文件: {formatBoolean(meta?.has_files, '有', '无')}
-          </Tag>
-          <Tag style={{ borderColor: 'var(--primary)', color: 'var(--primary)', margin: 0 }}>
-            使用: {formatDiskUsage(meta?.disk_usage)}
-          </Tag>
-        </Space>
+        {shouldShowOnlyMissingTag ? null : (
+          <>
+            <Space size={6} wrap style={{ marginTop: 4 }}>
+              {existsKnown && (
+                <Tag style={{ borderColor: 'var(--green)', color: 'var(--green)', margin: 0 }}>
+                  目录存在
+                </Tag>
+              )}
+              {writableKnown && (
+                <Tag style={{ borderColor: resolveBoolColor(writableValue, 'var(--green)', 'var(--orange)'), color: resolveBoolColor(writableValue, 'var(--green)', 'var(--orange)'), margin: 0 }}>
+                  {writableValue ? '可写' : '不可写'}
+                </Tag>
+              )}
+              {hasFilesKnown && (
+                <Tag style={{ borderColor: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), color: resolveBoolColor(meta?.has_files, 'var(--orange)', 'var(--green)'), margin: 0 }}>
+                  {meta?.has_files ? '已有文件' : '无文件'}
+                </Tag>
+              )}
+            </Space>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 6 }}>
+              <Text type="secondary">总容量(GB): {diskUsage?.size ? (formatStorageAmount(diskUsage.size) || diskUsage.size) : '-'}</Text>
+              <Text type="secondary">剩余(GB): {diskUsage?.available ? (formatStorageAmount(diskUsage.available) || diskUsage.available) : '-'}</Text>
+              <Text type="secondary">使用率(%): {typeof diskUsage?.percent === 'number' ? `${diskUsage.percent}%` : '-'}</Text>
+              <Text type="secondary">挂载点设备: {diskUsage?.filesystem || diskUsage?.mount_point || '-'}</Text>
+            </div>
+          </>
+        )}
       </div>
     )
   }
@@ -2168,11 +3161,28 @@ function SetupWizard() {
     const logDirMeta = storage.primary_log as Record<string, any> | undefined
     const standbyDataMeta = storage.standby_data as Record<string, any> | undefined
     const standbyLogMeta = storage.standby_log as Record<string, any> | undefined
-    const standbyDataSource: FieldValueSource = form.getFieldValue('standbyDataFilePath') ? 'user_input' : 'planned'
-    const standbyLogSource: FieldValueSource = form.getFieldValue('standbyRedoFilePath') ? 'user_input' : 'planned'
+    const standbyArchiveMeta = storage.standby_archive as Record<string, any> | undefined
+    const standbyAdumpMeta = storage.standby_adump as Record<string, any> | undefined
+    const standbyAdumpBasis = storage.standby_adump_derive_basis as Record<string, any> | undefined
+    const standbyDataSource: FieldValueSource = (form.getFieldValue('standbyDataFilePath') || standbyDataMeta?.input_path) ? 'user_input' : 'planned'
+    const standbyLogSource: FieldValueSource = (form.getFieldValue('standbyRedoFilePath') || standbyLogMeta?.input_path) ? 'user_input' : 'planned'
+    const standbyArchiveSource: FieldValueSource = form.getFieldValue('standbyArchivePath') ? 'user_input' : 'planned'
+    const standbyAdumpSource: FieldValueSource = standbyAdumpMeta?.input_path ? 'auto_success' : (previewData ? 'auto_failed' : 'planned')
+    const standbyAdumpTooltip = standbyAdumpBasis?.oracle_base && standbyAdumpBasis?.db_unique_name
+      ? `推导依据: ORACLE_BASE=${standbyAdumpBasis.oracle_base}; DB_UNIQUE_NAME=${standbyAdumpBasis.db_unique_name}`
+      : null
     const duplicateSource: FieldValueSource = 'user_input'
     return (
-      <Card title="搭建方式与环境摘要" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
+      <Card
+        title={
+          <Space align="center" size={8}>
+            <span>搭建方式与环境摘要</span>
+            {renderGroupStatusDot(getGroupStatus(GROUP_CHECK_MAP['setup-env']))}
+          </Space>
+        }
+        style={cardStyle}
+        headStyle={{ color: 'var(--text)' }}
+      >
         <Row gutter={[24, 24]}>
           <Col span={24} md={12}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -2194,7 +3204,7 @@ function SetupWizard() {
               })}
               {renderFieldValueRow({
                 rowKey: 'strategy-transport',
-                label: '日志同步方式',
+                label: '日志传输模式',
                 value: strategyValues.logTransportMode,
                 source: duplicateSource,
               })}
@@ -2206,8 +3216,8 @@ function SetupWizard() {
               })}
               {renderFieldValueRow({
                 rowKey: 'strategy-srl',
-                label: 'Standby Redo Log',
-                value: strategyValues.autoCreateSrl,
+                label: '自动创建 Standby Redo Log',
+                value: strategyValues.autoCreateSrl ? '自动创建' : '手动配置',
                 source: duplicateSource,
               })}
               {renderFieldValueRow({
@@ -2220,12 +3230,6 @@ function SetupWizard() {
                 rowKey: 'strategy-redo-path',
                 label: '联机日志路径策略',
                 value: PATH_STRATEGY_LABEL_MAP[strategyValues.redoFilePathStrategy as PathStrategy] || strategyValues.redoFilePathStrategy,
-                source: duplicateSource,
-              })}
-              {renderFieldValueRow({
-                rowKey: 'strategy-archive-dir',
-                label: '备库归档目录',
-                value: strategyValues.standbyArchivePath,
                 source: duplicateSource,
               })}
               {renderFieldValueRow({
@@ -2270,6 +3274,25 @@ function SetupWizard() {
                 standbyLogSource,
                 storage.standby_redo_path,
               )}
+              {renderDirectorySummary(
+                'standby-archive-dir',
+                '备库归档目录',
+                standbyArchiveMeta,
+                standbyArchiveSource,
+                strategyValues.standbyArchivePath || storage.standby_archive_path,
+              )}
+              {renderDirectorySummary(
+                'standby-adump-dir',
+                '备库 adump 目录',
+                standbyAdumpMeta,
+                standbyAdumpSource,
+                storage.standby_adump_path,
+                {
+                  sourceTagLabel: standbyAdumpSource === 'auto_success' ? '自动推导成功' : standbyAdumpSource === 'auto_failed' ? '推导失败' : undefined,
+                  sourceTagColor: standbyAdumpSource === 'auto_success' ? 'var(--green)' : standbyAdumpSource === 'auto_failed' ? 'var(--red)' : undefined,
+                  tooltip: renderDetectedValueIcon(standbyAdumpTooltip),
+                },
+              )}
             </Space>
           </Col>
         </Row>
@@ -2312,46 +3335,102 @@ function SetupWizard() {
       { key: 'warn', title: '警告 (Warn)' },
       { key: 'pass', title: '通过 (Pass)' },
     ]
+    const summaryItems = [
+      { label: '阻断项', value: previewData?.risk_summary?.failed ?? groups.fail.length, color: 'var(--red)' },
+      { label: '警告项', value: previewData?.risk_summary?.warned ?? groups.warn.length, color: 'var(--orange)' },
+      { label: '通过项', value: previewData?.risk_summary?.passed ?? groups.pass.length, color: 'var(--green)' },
+    ]
     return (
-      <Card title="预检查提示" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
+      <Card title="预检查结果" style={cardStyle} headStyle={{ color: 'var(--text)' }}>
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          {severityOrder.map((group) => (
-            <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Space align="center" size={8}>
-                <Tag style={{ borderColor: RESULT_COLORS[group.key], color: RESULT_COLORS[group.key], margin: 0 }}>
-                  {group.title}
-                </Tag>
-                <Text type="secondary">{groups[group.key].length ? `${groups[group.key].length} 项` : '暂无'}</Text>
-              </Space>
-              {groups[group.key].length === 0 ? (
-                <Text type="secondary">未检测到该类型的结果</Text>
-              ) : (
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {groups[group.key].map((item) => (
-                    <div key={item.check_name} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 8 }}>
-                      <Space size={6} wrap>
-                        <Tag style={{ borderColor: RESULT_COLORS[item.result], color: RESULT_COLORS[item.result], margin: 0 }}>
-                          {item.result.toUpperCase()}
-                        </Tag>
-                        <Text style={{ fontWeight: 600 }}>{item.check_name}</Text>
-                        {item.target && (
-                          <Tag style={{ margin: 0, borderColor: 'var(--text2)', color: 'var(--text2)' }}>
-                            对象: {item.target}
-                          </Tag>
-                        )}
-                      </Space>
-                      <Text style={{ display: 'block', marginTop: 4 }}>{item.message}</Text>
-                      {item.suggestion && (
-                        <Text type="secondary" style={{ display: 'block', marginTop: 2 }}>
-                          建议：{item.suggestion}
-                        </Text>
-                      )}
-                    </div>
-                  ))}
-                </Space>
-              )}
-            </div>
-          ))}
+          <Alert
+            type="info"
+            showIcon
+            message="环境预检查结论"
+            description="以下结果用于确认当前主库、备库及搭建环境是否满足 ADG 搭建前置条件。Fail 表示阻断项，Warn 表示风险提示，Pass 表示检查通过。"
+            style={{ borderColor: 'var(--border)', background: 'var(--bg3)' }}
+          />
+          <Space size={8} wrap>
+            {summaryItems.map((item) => (
+              <Tag key={item.label} style={{ borderColor: item.color, color: item.color, margin: 0 }}>
+                {item.label}: {item.value}
+              </Tag>
+            ))}
+          </Space>
+          <Collapse
+            bordered={false}
+            defaultActiveKey={severityOrder.filter((group) => group.key !== 'pass').map((group) => group.key)}
+            style={{ background: 'transparent' }}
+          >
+            {severityOrder.map((group) => (
+              <Panel
+                key={group.key}
+                header={(
+                  <Space align="center" size={8}>
+                    <Tag style={{ borderColor: RESULT_COLORS[group.key], color: RESULT_COLORS[group.key], margin: 0 }}>
+                      {group.title}
+                    </Tag>
+                    <Text type="secondary">{groups[group.key].length ? `${groups[group.key].length} 项` : '暂无'}</Text>
+                  </Space>
+                )}
+                style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, marginBottom: 8 }}
+              >
+                {groups[group.key].length === 0 ? (
+                  <Text type="secondary">未检测到该类型的结果</Text>
+                ) : (
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    {groups[group.key].map((item) => (
+                      <div id={`precheck-${item.check_name}`} key={item.check_name} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 8 }}>
+                        {(() => {
+                          const meta = getPrecheckDisplayMeta(item)
+                          const detectedResultText = getPrecheckDetectedResultText(item)
+                          const userInputText = getPrecheckUserInputText(item, form.getFieldsValue(true), previewData?.discovered_info)
+                          const finalResultText = getPrecheckFinalResultText(item)
+                          const summaryText = getPrecheckSummaryText(item)
+                          const dedupedSummaryText = summaryText && summaryText !== finalResultText ? summaryText : null
+                          const relatedFields = getPrecheckRelatedFields(item, meta.relatedFields)
+                          return (
+                            <>
+                              <Space size={6} wrap align="center">
+                                <Text style={{ fontWeight: 600 }}>{meta.title}</Text>
+                                <Tag style={{ borderColor: RESULT_COLORS[item.result], color: RESULT_COLORS[item.result], margin: 0 }}>
+                                  等级: {item.result.toUpperCase()}
+                                </Tag>
+                                <Tag style={{ margin: 0, borderColor: RISK_COLORS[item.risk_level], color: RISK_COLORS[item.risk_level] }}>
+                                  风险: {item.risk_level.toUpperCase()}
+                                </Tag>
+                                <Tag style={{ margin: 0, borderColor: item.blocking ? 'var(--red)' : 'var(--border)', color: item.blocking ? 'var(--red)' : 'var(--text2)' }}>
+                                  阻断: {getPrecheckBlockingText(item)}
+                                </Tag>
+                                <Tag style={{ margin: 0, borderColor: 'var(--text2)', color: 'var(--text2)' }}>
+                                  影响范围: {meta.scope}
+                                </Tag>
+                                <Tag style={{ margin: 0, borderColor: 'var(--border)', color: 'var(--text2)' }}>
+                                  分组: {item.category}
+                                </Tag>
+                                {relatedFields.map((field) => (
+                                  <Tag key={`${item.check_name}-${field}`} style={{ margin: 0, borderColor: 'var(--primary)', color: 'var(--primary)' }}>
+                                    关联字段: {getFieldLabel(field)}
+                                  </Tag>
+                                ))}
+                              </Space>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8 }}>
+                                <Text style={{ margin: 0 }}>说明：{toSentence(meta.description)}</Text>
+                                {detectedResultText ? <Text type="secondary" style={{ margin: 0 }}>自动探测 / 推导结果：{toSentence(detectedResultText)}</Text> : null}
+                                {userInputText ? <Text type="secondary" style={{ margin: 0 }}>用户输入：{toSentence(userInputText)}</Text> : null}
+                                {dedupedSummaryText ? <Text type="secondary" style={{ margin: 0 }}>校验结果：{toSentence(dedupedSummaryText)}</Text> : null}
+                                <Text type="secondary" style={{ margin: 0 }}>最终结果：{finalResultText}</Text>
+                              </div>
+                            </>
+                          )
+                        })()}
+                      </div>
+                    ))}
+                  </Space>
+                )}
+              </Panel>
+            ))}
+          </Collapse>
         </Space>
       </Card>
     )
@@ -2489,7 +3568,7 @@ function SetupWizard() {
             showIcon
             message="预检查存在阻塞项"
             description={previewData?.risk_summary?.blocking_issues?.length
-              ? previewData.risk_summary.blocking_issues.join('、')
+              ? formatPrecheckNames(previewData.risk_summary.blocking_issues).join('、')
               : '请根据预检查表中的 FAIL 项进行整改后再提交'}
           />
         )}
@@ -2546,7 +3625,7 @@ function SetupWizard() {
                     type="error"
                     showIcon
                     message="阻断项"
-                    description={previewData.risk_summary.blocking_issues.join('、')}
+                    description={formatPrecheckNames(previewData.risk_summary.blocking_issues).join('、')}
                   />
                 ) : (
                   <Alert type="success" showIcon message="未发现阻断项" />
@@ -3156,7 +4235,7 @@ function SetupWizard() {
               </Card>
             </Col>
           </Row>
-          <Card style={cardStyle} title="搭建方式以及全局配置">
+          <Card style={cardStyle} title="搭建方式与全局配置">
             <Space direction="vertical" size="large" style={{ width: '100%' }}>
               <div>
                 <Text style={{ fontWeight: 600, color: 'var(--text)' }}>复制策略</Text>
